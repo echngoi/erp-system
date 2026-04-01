@@ -483,6 +483,71 @@ free -h
 # Xem containers đang chạy
 docker ps
 
+────────────────────────────────────────────────────
+BƯỚC 15: KIỂM TRA BACKEND ĐÃ HOẠT ĐỘNG CHƯA (BỎ QUA MIGRATE SQLITE)
+────────────────────────────────────────────────────
+
+# [15.1] Đảm bảo tất cả containers đang chạy
+cd /opt/erp
+docker compose up -d
+sleep 15
+
+# [15.2] Kiểm tra trạng thái tất cả containers
+docker compose ps
+# Kết quả đúng: tất cả phải "Up", backend phải "healthy"
+#   erp-backend-1   Up (healthy)
+#   erp-db-1        Up (healthy)
+#   erp-redis-1     Up (healthy)
+#   erp-nginx-1     Up
+#   erp-certbot-1   Up
+
+# [15.3] Test API qua HTTPS (phải trả về JSON lỗi auth — nghĩa là backend OK)
+curl -s https://hrmgo.site/api/users/me/
+# Kết quả đúng: {"detail":"Authentication credentials were not provided."}
+
+# [15.4] Test endpoint máy chấm công qua HTTP
+curl -s http://hrmgo.site/iclock/cdata?SN=test
+# Kết quả đúng: "GET OPTION FROM: test..." kèm config
+
+# [15.5] Test Django Admin mở được không
+curl -s -o /dev/null -w "%{http_code}" https://hrmgo.site/admin/
+# Kết quả đúng: 302 (redirect đến trang login)
+
+# [15.6] Tạo tài khoản admin mới (nếu chưa tạo hoặc muốn tạo lại)
+docker compose exec backend python manage.py createsuperuser
+# Nhập username, email, password theo hướng dẫn
+
+# [15.7] Kiểm tra database PostgreSQL đã có tables chưa
+docker compose exec backend python manage.py shell -c "
+from django.apps import apps
+total = 0
+for model in apps.get_models():
+    count = model.objects.count()
+    if count > 0:
+        print(f'  {model._meta.label}: {count}')
+    total += count
+print(f'Tổng records: {total}')
+"
+
+# [15.8] Xem logs backend 20 dòng cuối (không có lỗi đỏ = OK)
+docker compose logs backend --tail=20
+
+# [15.9] Test WebSocket hoạt động không
+curl -s -o /dev/null -w "%{http_code}" \
+  -H "Upgrade: websocket" \
+  -H "Connection: Upgrade" \
+  https://hrmgo.site/ws/attendance/
+# Kết quả: 400 hoặc 101 đều OK (nghĩa là endpoint tồn tại)
+
+# ── KẾT QUẢ MONG ĐỢI ──
+# [15.3] trả về JSON → ✅ API hoạt động
+# [15.4] trả về config → ✅ Máy chấm công có thể kết nối
+# [15.5] trả về 302   → ✅ Django Admin hoạt động
+# [15.6] tạo user OK  → ✅ Database ghi được
+# Nếu TẤT CẢ đều OK → Backend đã sẵn sàng!
+# → Mở trình duyệt: https://hrmgo.site/admin/ đăng nhập bằng superuser vừa tạo
+
+
 ====================================================
   XONG! Báo lại khi hoàn thành từng bước.
 ====================================================
@@ -492,45 +557,71 @@ docker ps
 SỬA LỖI MIGRATE: Dữ liệu vẫn = 0 sau khi chạy script
 ────────────────────────────────────────────────────
 
-# Nếu script báo lỗi hoặc dữ liệu vẫn = 0, chạy thủ công từng bước:
+# NGUYÊN NHÂN: docker compose run --rm tạo container MỚI mỗi lần
+# → file data_dump.json bị xóa cùng container cũ → container mới không thấy
+# GIẢI PHÁP: Dùng -v mount thư mục host vào container để file nằm trên host
 
-# [M.1] Pull code mới nhất (có script đã sửa)
-cd /opt/erp && git stash && git pull origin master && git stash drop
-sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
-
-# [M.2] Rebuild backend với code mới
-docker compose build backend
+# [M.1] Đảm bảo db & redis đang chạy
+cd /opt/erp
 docker compose up -d db redis
 sleep 10
 
-# [M.3] Export dữ liệu từ SQLite (tạo file data_dump.json)
+# [M.2] Kiểm tra db.sqlite3 có trên host
+ls -lh /opt/erp/backend/db.sqlite3
+# Phải thấy file > 0 bytes. Nếu không có → chạy scp từ Windows trước
+
+# [M.3] Chạy migrations tạo schema PostgreSQL
+docker compose run --rm backend python manage.py migrate --run-syncdb
+
+# [M.4] Export dữ liệu từ SQLite ra file JSON (LƯU TRÊN HOST)
+# Mount thư mục host /opt/erp/backend → /host trong container
+# để file data_dump.json nằm trên host, KHÔNG bị xóa
 docker compose run --rm \
-  -e DJANGO_SETTINGS_MODULE=config.settings_sqlite_export \
+  -v /opt/erp/backend:/host \
   backend bash -c "
+# Tạo settings tạm trỏ về SQLite
 cat > /app/config/settings_sqlite_export.py << 'PYEOF'
 from config.settings import *
-DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3'}}
+DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': '/host/db.sqlite3'}}
 PYEOF
+
+# Export từ SQLite ra file JSON trên HOST
+DJANGO_SETTINGS_MODULE=config.settings_sqlite_export \
 python manage.py dumpdata \
   --natural-foreign --natural-primary \
   --exclude=contenttypes --exclude=auth.permission \
   --exclude=sessions.session --exclude=admin.logentry \
-  --indent=2 --output=/app/data_dump.json
-echo 'Export xong, size:'
-ls -lh /app/data_dump.json
+  --indent=2 --output=/host/data_dump.json
+
+echo '=== Export xong ==='
+ls -lh /host/data_dump.json
 "
 
-# [M.4] Kiểm tra file dump có dữ liệu không (phải > 100KB)
-docker compose run --rm backend ls -lh /app/data_dump.json
+# [M.5] Kiểm tra file dump ĐÃ NẰM TRÊN HOST chưa (phải > 100KB)
+ls -lh /opt/erp/backend/data_dump.json
+# NẾU THẤY FILE → tiếp M.6
+# NẾU KHÔNG THẤY → bước M.4 có lỗi, xem output phía trên
 
-# [M.5] Import vào PostgreSQL
-docker compose run --rm backend python manage.py loaddata /app/data_dump.json --ignorenonexistent
+# [M.6] Import vào PostgreSQL (mount lại host để đọc file)
+docker compose run --rm \
+  -v /opt/erp/backend:/host \
+  backend python manage.py loaddata /host/data_dump.json --ignorenonexistent
 
-# [M.6] Kiểm tra lại
+# [M.7] Kiểm tra dữ liệu
 docker compose exec backend python manage.py shell -c "
 from users.models import User
 from attendance.models import Employee, AttendanceLog
+from departments.models import Department
 print(f'Users: {User.objects.count()}')
+print(f'Departments: {Department.objects.count()}')
 print(f'Employees: {Employee.objects.count()}')
 print(f'AttendanceLogs: {AttendanceLog.objects.count()}')
 "
+# Users, Employees, AttendanceLogs phải > 0
+
+# [M.8] Dọn dẹp file tạm
+rm -f /opt/erp/backend/data_dump.json
+rm -f /opt/erp/backend/config/settings_sqlite_export.py
+
+# [M.9] Khởi động lại toàn bộ
+docker compose up -d
