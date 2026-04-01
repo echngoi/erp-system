@@ -1,0 +1,173 @@
+.admin-layout {
+  min-height: 100vh;
+  background: #f5f7fb;
+}
+
+.admin-brand {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 20px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+}
+
+.admin-brand__title {
+  color: #fff;
+  font-size: 18px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.admin-sider {
+  background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+}
+
+.admin-sider .ant-layout-sider-trigger {
+  background: #111827;
+}
+
+.admin-menu {
+  background: transparent;
+  border-inline-end: none;
+  color: #e5e7eb;
+}
+
+.admin-menu,
+.admin-menu.ant-menu-dark,
+.admin-menu.ant-menu-dark .ant-menu-sub,
+.admin-menu .ant-menu-item,
+.admin-menu.ant-menu-dark .ant-menu-item,
+.admin-menu .ant-menu-item a,
+.admin-menu.ant-menu-dark .ant-menu-item a,
+.admin-menu .ant-menu-item .ant-menu-title-content,
+.admin-menu.ant-menu-dark .ant-menu-item .ant-menu-title-content,
+.admin-menu .ant-menu-item .anticon,
+.admin-menu.ant-menu-dark .ant-menu-item .anticon {
+  color: #d1d5db !important;
+}
+
+.admin-menu .ant-menu-item {
+  margin-inline: 12px;
+  width: calc(100% - 24px);
+  border-radius: 10px;
+}
+
+.admin-menu .ant-menu-item:hover,
+.admin-menu.ant-menu-dark .ant-menu-item:hover {
+  color: #ffffff !important;
+  background: rgba(59, 130, 246, 0.18) !important;
+}
+
+.admin-menu .ant-menu-item:hover .anticon,
+.admin-menu .ant-menu-item:hover .ant-menu-title-content,
+.admin-menu.ant-menu-dark .ant-menu-item:hover .anticon,
+.admin-menu.ant-menu-dark .ant-menu-item:hover .ant-menu-title-content {
+  color: #ffffff !important;
+}
+
+.admin-menu .ant-menu-item-selected,
+.admin-menu.ant-menu-dark .ant-menu-item-selected {
+  background: rgba(59, 130, 246, 0.38) !important;
+}
+
+.admin-menu .ant-menu-item-selected,
+.admin-menu .ant-menu-item-selected .anticon,
+.admin-menu .ant-menu-item-selected .ant-menu-title-content,
+.admin-menu.ant-menu-dark .ant-menu-item-selected,
+.admin-menu.ant-menu-dark .ant-menu-item-selected .anticon,
+.admin-menu.ant-menu-dark .ant-menu-item-selected .ant-menu-title-content {
+  color: #ffffff !important;
+}
+
+.admin-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 16px;
+  min-height: 72px;
+  height: auto;
+  line-height: 1.2;
+  padding: 12px 20px;
+  background: rgba(255, 255, 255, 0.92);
+  border-bottom: 1px solid #e5e7eb;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  backdrop-filter: blur(12px);
+}
+
+.admin-header__left {
+  display: flex;
+  align-items: center;
+  flex-wrap: nowrap;
+  gap: 12px;
+  min-width: 0;
+}
+
+.admin-header__actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-left: auto;
+}
+
+.admin-header__home-btn {
+  border-radius: 10px;
+}
+
+.admin-content {
+  padding: 20px;
+}
+
+.admin-content__inner {
+  min-height: calc(100vh - 104px);
+}
+
+.admin-user-trigger {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+}
+
+.admin-user-trigger__meta {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  line-height: 1.2;
+}
+
+.admin-user-trigger__name {
+  color: #111827;
+  font-weight: 600;
+}
+
+.admin-user-trigger__role {
+  color: #6b7280;
+  font-size: 12px;
+  text-transform: uppercase;
+}
+
+.admin-mobile-drawer .ant-drawer-body {
+  padding: 0;
+  background: linear-gradient(180deg, #0f172a 0%, #111827 100%);
+}
+
+@media (max-width: 991px) {
+  .admin-header {
+    padding: 12px 16px;
+  }
+
+  .admin-content {
+    padding: 16px;
+  }
+
+  .admin-header__actions {
+    margin-left: 0;
+  }
+
+  .admin-user-trigger__meta {
+    display: none;
+  }
+}

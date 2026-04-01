@@ -1,0 +1,53 @@
+# ══════════════════════════════════════════════════════════
+# CI/CD: Auto deploy Backend to Hetzner VPS on push to main
+# ══════════════════════════════════════════════════════════
+name: Deploy Backend
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'backend/**'
+      - 'docker-compose.yml'
+      - 'deploy/**'
+
+jobs:
+  deploy:
+    name: Deploy to VPS
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to VPS via SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            cd /opt/erp
+
+            # Pull latest code
+            git pull origin main
+
+            # Build & restart containers
+            docker compose build backend
+            docker compose up -d backend
+
+            # Run migrations
+            docker compose exec -T backend python manage.py migrate --noinput
+
+            # Collect static files
+            docker compose exec -T backend python manage.py collectstatic --noinput
+
+            # Verify health
+            sleep 5
+            if curl -sf http://localhost:8000/iclock/cdata?SN=healthcheck > /dev/null; then
+              echo "✅ Backend healthy"
+            else
+              echo "❌ Backend unhealthy — rolling back"
+              docker compose logs --tail=50 backend
+              exit 1
+            fi
