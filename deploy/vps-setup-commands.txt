@@ -1,0 +1,322 @@
+====================================================
+  HƯỚNG DẪN CÀI ĐẶT DOCKER TRÊN VPS - BIZFLYCLOUD
+  Domain : hrmgo.site
+  VPS IP : 123.30.48.72
+  Chạy từng lệnh theo thứ tự, đợi lệnh trước xong rồi mới chạy lệnh sau
+====================================================
+
+
+────────────────────────────────────────────────────
+BƯỚC 3: CÀI ĐẶT DOCKER TRÊN VPS
+────────────────────────────────────────────────────
+
+# [3.1] Cập nhật danh sách package (đợi 1-2 phút)
+apt-get update
+
+# [3.2] Nâng cấp package cũ (đợi 2-5 phút, nhấn Enter nếu có hỏi)
+apt-get upgrade -y
+
+# [3.3] Cài các package cần thiết để dùng HTTPS package manager
+apt-get install -y ca-certificates curl gnupg lsb-release git
+
+# [3.4] Tải script cài Docker tự động (cách nhanh nhất)
+curl -fsSL https://get.docker.com -o get-docker.sh
+
+# [3.5] Chạy script cài Docker (đợi 3-5 phút)
+sh get-docker.sh
+
+# [3.6] Bật Docker tự khởi động khi reboot VPS
+systemctl enable docker
+
+# [3.7] Khởi động Docker ngay bây giờ
+systemctl start docker
+
+# [3.8] Kiểm tra Docker đã cài thành công chưa
+# Kết quả phải hiện: Docker version 27.x.x (hoặc cao hơn)
+docker --version
+
+# [3.9] Kiểm tra Docker Compose (tích hợp sẵn với Docker mới)
+# Kết quả phải hiện: Docker Compose version v2.x.x
+docker compose version
+
+# [3.10] Xóa file cài đặt không cần nữa
+rm get-docker.sh
+
+# [3.11] Kiểm tra Docker daemon đang chạy
+# Kết quả phải hiện: Active: active (running)
+systemctl status docker --no-pager
+
+
+────────────────────────────────────────────────────
+BƯỚC 4: MỞ FIREWALL
+────────────────────────────────────────────────────
+
+# [4.1] Cài UFW (firewall)
+apt-get install -y ufw
+
+# [4.2] Đặt mặc định: chặn tất cả inbound
+ufw default deny incoming
+
+# [4.3] Đặt mặc định: cho phép tất cả outbound
+ufw default allow outgoing
+
+# [4.4] Cho phép SSH (QUAN TRỌNG - đừng bỏ bước này kẻo mất kết nối)
+ufw allow 22/tcp
+
+# [4.5] Cho phép HTTP (máy chấm công + web)
+ufw allow 80/tcp
+
+# [4.6] Cho phép HTTPS (web app)
+ufw allow 443/tcp
+
+# [4.7] Bật firewall (nhập y rồi Enter khi được hỏi)
+ufw enable
+
+# [4.8] Kiểm tra trạng thái firewall
+# Phải thấy: 22, 80, 443 là ALLOW
+ufw status
+
+
+────────────────────────────────────────────────────
+BƯỚC 5: CLONE CODE VỀ VPS
+────────────────────────────────────────────────────
+
+# [5.1] Vào thư mục /opt (nơi đặt ứng dụng)
+cd /opt
+
+# [5.2] Clone code từ GitHub về VPS
+# !! THAY TEN_GITHUB_CUA_BAN và erp-system bằng thông tin thật !!
+git clone https://github.com/echngoi/erp-system.git erp
+
+# [5.3] Vào thư mục dự án
+cd /opt/erp
+
+# [5.4] Kiểm tra code đã clone đủ chưa
+ls -la
+
+
+────────────────────────────────────────────────────
+BƯỚC 6: MỞ FIREWALL BIZFLYCLOUD (trên Dashboard)
+────────────────────────────────────────────────────
+
+Vào: manage.bizflycloud.vn
+→ Cloud Server → chọn máy chủ → Firewall / Security Group
+→ Thêm rule:
+   - Port 22  TCP  (SSH)
+   - Port 80  TCP  (HTTP)
+   - Port 443 TCP  (HTTPS)
+Source: 0.0.0.0/0
+
+
+────────────────────────────────────────────────────
+BƯỚC 7: TẠO FILE CẤU HÌNH .env
+────────────────────────────────────────────────────
+
+# [7.1] Tạo secret key ngẫu nhiên (copy kết quả ra Notepad)
+openssl rand -base64 50 | tr -d '=/+' | head -c 50
+
+# [7.2] Tạo database password ngẫu nhiên (copy kết quả ra Notepad)
+openssl rand -base64 24 | tr -d '=/+'
+
+# [7.3] Tạo file .env cho docker-compose
+# !! THAY DB_PASSWORD_BAN_TAO bằng password từ bước 7.2 !!
+cat > /opt/erp/.env << 'EOF'
+DB_NAME=erp
+DB_USER=erp
+DB_PASSWORD=DB_PASSWORD_BAN_TAO
+EOF
+
+# [7.4] Tạo file .env.production cho Django
+# !! THAY SECRET_KEY_BAN_TAO = kết quả bước 7.1 !!
+# !! THAY DB_PASSWORD_BAN_TAO = kết quả bước 7.2 !!
+cat > /opt/erp/backend/.env.production << 'EOF'
+DEBUG=False
+SECRET_KEY=SECRET_KEY_BAN_TAO
+ALLOWED_HOSTS=hrmgo.site,www.hrmgo.site
+CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+DJANGO_SETTINGS_MODULE=config.settings_prod
+
+ZK_DEVICE_IP=0.0.0.0
+ZK_DEVICE_PORT=5005
+ZK_DEVICE_TIMEOUT=10
+ZK_DEVICE_PASSWORD=0
+ZK_PROTOCOL=adms
+
+DB_NAME=erp
+DB_USER=erp
+DB_PASSWORD=DB_PASSWORD_BAN_TAO
+EOF
+
+# [7.5] Kiểm tra 2 file vừa tạo
+cat /opt/erp/.env
+cat /opt/erp/backend/.env.production
+
+
+────────────────────────────────────────────────────
+BƯỚC 8: KIỂM TRA NGINX CONFIG (domain đã được cấu hình sẵn)
+────────────────────────────────────────────────────
+
+# [8.1] Kiểm tra domain đã đúng hrmgo.site chưa
+grep "server_name" /opt/erp/deploy/nginx.conf
+# Phải thấy: server_name hrmgo.site www.hrmgo.site;
+
+# [8.2] Kiểm tra đường dẫn SSL certificate đúng domain
+grep "ssl_certificate" /opt/erp/deploy/nginx.conf
+# Phải thấy: /etc/letsencrypt/live/hrmgo.site/fullchain.pem
+
+
+────────────────────────────────────────────────────
+BƯỚC 9: LẤY SSL CERTIFICATE (HTTPS)
+────────────────────────────────────────────────────
+
+# [9.1] Tạo Docker volumes cho Certbot
+docker volume create erp_certbot_conf
+docker volume create erp_certbot_www
+
+# [9.2] Tạo nginx config tạm để xác thực domain
+mkdir -p /opt/erp/deploy/nginx-init
+cat > /opt/erp/deploy/nginx-init/default.conf << 'EOF'
+server {
+    listen 80;
+    server_name _;
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location / {
+        return 200 'ERP Server OK';
+        add_header Content-Type text/plain;
+    }
+}
+EOF
+
+# [9.3] Chạy nginx tạm
+docker run -d --name nginx-temp \
+  -p 80:80 \
+  -v /opt/erp/deploy/nginx-init:/etc/nginx/conf.d:ro \
+  -v erp_certbot_www:/var/www/certbot \
+  nginx:alpine
+
+# [9.4] Kiểm tra nginx tạm chạy chưa (phải trả về "ERP Server OK")
+curl http://hrmgo.site
+
+# [9.5] Lấy SSL certificate từ Let's Encrypt
+# !! THAY your@email.com bằng email thật của bạn !!
+docker run --rm \
+  -v erp_certbot_conf:/etc/letsencrypt \
+  -v erp_certbot_www:/var/www/certbot \
+  certbot/certbot certonly \
+  --webroot --webroot-path=/var/www/certbot \
+  --email your@email.com \
+  --agree-tos --no-eff-email \
+  -d hrmgo.site -d www.hrmgo.site
+
+# [9.6] Dọn nginx tạm sau khi lấy SSL xong
+docker stop nginx-temp && docker rm nginx-temp
+
+# [9.7] Kiểm tra certificate đã tạo thành công
+docker run --rm -v erp_certbot_conf:/etc/letsencrypt alpine \
+  ls /etc/letsencrypt/live/
+# Phải thấy folder: hrmgo.site
+
+
+────────────────────────────────────────────────────
+BƯỚC 10: SỬA DOCKER-COMPOSE DÙNG VOLUMES SSL ĐÃ TẠO
+────────────────────────────────────────────────────
+
+# Sửa docker-compose.yml để dùng external volumes certbot
+sed -i 's/^  certbot_conf:$/  certbot_conf:\n    external: true\n    name: erp_certbot_conf/' /opt/erp/docker-compose.yml
+sed -i 's/^  certbot_www:$/  certbot_www:\n    external: true\n    name: erp_certbot_www/' /opt/erp/docker-compose.yml
+
+# Kiểm tra
+tail -20 /opt/erp/docker-compose.yml
+
+
+────────────────────────────────────────────────────
+BƯỚC 11: COPY DB SQLITE3 TỪ MÁY LOCAL LÊN VPS
+────────────────────────────────────────────────────
+
+# Chạy lệnh này trên MÁY TÍNH CỦA BẠN (PowerShell Windows) - KHÔNG phải VPS
+scp "d:\myproject\ERP (COPY)\backend\db.sqlite3" root@123.30.48.72:/opt/erp/backend/
+
+
+────────────────────────────────────────────────────
+BƯỚC 12: BUILD VÀ CHẠY TOÀN BỘ HỆ THỐNG
+────────────────────────────────────────────────────
+
+cd /opt/erp
+
+# [12.1] Build Docker images (đợi 5-10 phút lần đầu)
+docker compose build
+
+# [12.2] Khởi động PostgreSQL và Redis trước
+docker compose up -d db redis
+
+# [12.3] Đợi DB sẵn sàng (30 giây)
+sleep 30
+
+# [12.4] Chuyển dữ liệu SQLite sang PostgreSQL
+chmod +x deploy/migrate-sqlite-to-postgres.sh
+bash deploy/migrate-sqlite-to-postgres.sh
+
+# [12.5] Khởi động toàn bộ hệ thống
+docker compose up -d
+
+# [12.6] Kiểm tra tất cả containers đang chạy
+# Phải thấy: db, redis, backend, nginx - tất cả "Up"
+docker compose ps
+
+# [12.7] Xem logs backend (Ctrl+C để thoát)
+docker compose logs -f backend
+
+
+────────────────────────────────────────────────────
+BƯỚC 13: TẠO TÀI KHOẢN ADMIN
+────────────────────────────────────────────────────
+
+docker compose exec backend python manage.py createsuperuser
+
+
+────────────────────────────────────────────────────
+BƯỚC 14: KIỂM TRA CUỐI CÙNG
+────────────────────────────────────────────────────
+
+# Test HTTPS API
+curl https://hrmgo.site/api/users/me/
+
+# Test HTTP iclock (máy chấm công)
+curl http://hrmgo.site/iclock/cdata?SN=test
+
+# Trình duyệt mở Django Admin
+# https://hrmgo.site/admin/
+
+
+────────────────────────────────────────────────────
+CÁC LỆNH DEBUG KHI CÓ SỰ CỐ
+────────────────────────────────────────────────────
+
+# Xem logs tất cả services
+docker compose logs
+
+# Xem logs service cụ thể
+docker compose logs backend
+docker compose logs nginx
+docker compose logs db
+
+# Restart 1 service
+docker compose restart backend
+
+# Restart toàn bộ
+docker compose down && docker compose up -d
+
+# Xem disk usage
+df -h
+
+# Xem RAM
+free -h
+
+# Xem containers đang chạy
+docker ps
+
+====================================================
+  XONG! Báo lại khi hoàn thành từng bước.
+====================================================
