@@ -40,4 +40,3 @@ class LateEarlyRuleAdmin(admin.ModelAdmin):
 class PenaltyConfigAdmin(admin.ModelAdmin):
     list_display = ['shift', 'rule_type', 'from_count', 'to_count', 'penalty_amount']
     list_filter = ['shift', 'rule_type']
-    readonly_fields = ['started_at', 'finished_at', 'status', 'records_synced', 'error_message']
