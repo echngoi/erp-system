@@ -272,9 +272,39 @@ docker compose up -d db redis
 # [12.3] Đợi DB sẵn sàng (30 giây)
 sleep 30
 
-# [12.4] Chuyển dữ liệu SQLite sang PostgreSQL
-chmod +x deploy/migrate-sqlite-to-postgres.sh
-bash deploy/migrate-sqlite-to-postgres.sh
+# [12.4] Chuyển dữ liệu SQLite → PostgreSQL
+# ── Chạy từng lệnh theo thứ tự ──
+
+# [12.4.1] Cấp quyền chạy script
+chmod +x /opt/erp/deploy/migrate-sqlite-to-postgres.sh
+
+# [12.4.2] Kiểm tra file db.sqlite3 đã có trên VPS chưa (phải > 0)
+ls -lh /opt/erp/backend/db.sqlite3
+# Nếu KHÔNG thấy file → chạy lệnh này trên máy Windows trước:
+#   scp "d:\myproject\ERP (COPY)\backend\db.sqlite3" root@123.30.48.72:/opt/erp/backend/
+
+# [12.4.3] Chạy script migrate (đợi 2-5 phút)
+bash /opt/erp/deploy/migrate-sqlite-to-postgres.sh
+# Phải thấy:
+#   ✅ Tìm thấy db.sqlite3
+#   → Bước 1/4: Đảm bảo containers đang chạy...
+#   → Bước 2/4: Chạy migrations...
+#   → Bước 3/4: Export dữ liệu từ SQLite...
+#   → Bước 4/4: Import dữ liệu vào PostgreSQL...
+#   ✅ HOÀN TẤT!
+
+# [12.4.4] Kiểm tra dữ liệu đã vào PostgreSQL chưa
+docker compose exec backend python manage.py shell -c "
+from users.models import User
+from attendance.models import Employee, AttendanceLog
+from departments.models import Department
+print(f'Users: {User.objects.count()}')
+print(f'Departments: {Department.objects.count()}')
+print(f'Employees: {Employee.objects.count()}')
+print(f'AttendanceLogs: {AttendanceLog.objects.count()}')
+"
+# Kết quả phải khớp với dữ liệu local, Employee và AttendanceLog phải > 0
+# Nếu tất cả = 0 hoặc = 1 → script chưa chạy đúng, xem mục SỬA LỖI MIGRATE bên dưới
 
 # [12.5] Khởi động toàn bộ hệ thống
 docker compose up -d
@@ -456,3 +486,51 @@ docker ps
 ====================================================
   XONG! Báo lại khi hoàn thành từng bước.
 ====================================================
+
+
+────────────────────────────────────────────────────
+SỬA LỖI MIGRATE: Dữ liệu vẫn = 0 sau khi chạy script
+────────────────────────────────────────────────────
+
+# Nếu script báo lỗi hoặc dữ liệu vẫn = 0, chạy thủ công từng bước:
+
+# [M.1] Pull code mới nhất (có script đã sửa)
+cd /opt/erp && git stash && git pull origin master && git stash drop
+sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
+
+# [M.2] Rebuild backend với code mới
+docker compose build backend
+docker compose up -d db redis
+sleep 10
+
+# [M.3] Export dữ liệu từ SQLite (tạo file data_dump.json)
+docker compose run --rm \
+  -e DJANGO_SETTINGS_MODULE=config.settings_sqlite_export \
+  backend bash -c "
+cat > /app/config/settings_sqlite_export.py << 'PYEOF'
+from config.settings import *
+DATABASES = {'default': {'ENGINE': 'django.db.backends.sqlite3', 'NAME': BASE_DIR / 'db.sqlite3'}}
+PYEOF
+python manage.py dumpdata \
+  --natural-foreign --natural-primary \
+  --exclude=contenttypes --exclude=auth.permission \
+  --exclude=sessions.session --exclude=admin.logentry \
+  --indent=2 --output=/app/data_dump.json
+echo 'Export xong, size:'
+ls -lh /app/data_dump.json
+"
+
+# [M.4] Kiểm tra file dump có dữ liệu không (phải > 100KB)
+docker compose run --rm backend ls -lh /app/data_dump.json
+
+# [M.5] Import vào PostgreSQL
+docker compose run --rm backend python manage.py loaddata /app/data_dump.json --ignorenonexistent
+
+# [M.6] Kiểm tra lại
+docker compose exec backend python manage.py shell -c "
+from users.models import User
+from attendance.models import Employee, AttendanceLog
+print(f'Users: {User.objects.count()}')
+print(f'Employees: {Employee.objects.count()}')
+print(f'AttendanceLogs: {AttendanceLog.objects.count()}')
+"

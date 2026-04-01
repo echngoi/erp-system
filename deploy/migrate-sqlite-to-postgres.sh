@@ -33,37 +33,35 @@ docker compose run --rm backend python manage.py migrate --noinput
 echo "✅ Schema PostgreSQL đã sẵn sàng"
 echo ""
 
-# Bước 3: Export dữ liệu từ SQLite (chạy với settings gốc, dùng SQLite)
+# Bước 3: Export dữ liệu từ SQLite
 echo "→ Bước 3/4: Export dữ liệu từ SQLite..."
+
+# Tạo settings tạm dùng SQLite để export
+cat > /opt/erp/backend/config/settings_sqlite_export.py << 'PYEOF'
+from config.settings import *
+DATABASES = {
+    'default': {
+        'ENGINE': 'django.db.backends.sqlite3',
+        'NAME': BASE_DIR / 'db.sqlite3',
+    }
+}
+PYEOF
+
 docker compose run --rm \
-    -e DJANGO_SETTINGS_MODULE=config.settings \
-    -v /opt/erp/backend/db.sqlite3:/app/db.sqlite3:ro \
-    backend python -c "
-import os, json, sys
-os.environ['DJANGO_SETTINGS_MODULE'] = 'config.settings'
+    -e DJANGO_SETTINGS_MODULE=config.settings_sqlite_export \
+    backend python manage.py dumpdata \
+    --natural-foreign \
+    --natural-primary \
+    --exclude=contenttypes \
+    --exclude=auth.permission \
+    --exclude=sessions.session \
+    --exclude=admin.logentry \
+    --indent=2 \
+    --output=/app/data_dump.json
 
-import django
-django.setup()
+# Xóa settings tạm
+rm -f /opt/erp/backend/config/settings_sqlite_export.py
 
-from django.core.management import call_command
-
-# Export toàn bộ data, exclude các bảng Django tự quản lý session/content_type
-# vì chúng sẽ được tạo lại bởi migrate
-print('Đang export...', file=sys.stderr)
-with open('/app/data_dump.json', 'w', encoding='utf-8') as f:
-    call_command(
-        'dumpdata',
-        '--natural-foreign',
-        '--natural-primary',
-        '--exclude=contenttypes',
-        '--exclude=auth.permission',
-        '--exclude=sessions.session',
-        '--exclude=admin.logentry',
-        '--indent=2',
-        stdout=f,
-    )
-print('✅ Export xong!', file=sys.stderr)
-"
 echo "✅ Dữ liệu đã export thành data_dump.json"
 echo ""
 
