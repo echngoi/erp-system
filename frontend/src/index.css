@@ -91,12 +91,6 @@ body {
 .erp-app-menu .ant-menu-submenu-selected > .ant-menu-submenu-title .ant-menu-title-content,
 .erp-app-menu .ant-menu-submenu-selected > .ant-menu-submenu-title .anticon {
   color: #ffffff !important;
-}
-}
-
-.erp-app-menu .ant-menu-item-selected .anticon,
-.erp-app-menu.ant-menu-light .ant-menu-item-selected .anticon {
-  color: #ffffff !important;
   filter: drop-shadow(0 0 6px rgba(147, 197, 253, 0.35));
 }
 
