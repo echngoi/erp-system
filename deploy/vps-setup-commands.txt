@@ -153,16 +153,34 @@ cat /opt/erp/backend/.env.production
 
 
 ────────────────────────────────────────────────────
-BƯỚC 8: KIỂM TRA NGINX CONFIG (domain đã được cấu hình sẵn)
+BƯỚC 8: CẤU HÌNH NGINX VỚI DOMAIN hrmgo.site
 ────────────────────────────────────────────────────
 
-# [8.1] Kiểm tra domain đã đúng hrmgo.site chưa
-grep "server_name" /opt/erp/deploy/nginx.conf
-# Phải thấy: server_name hrmgo.site www.hrmgo.site;
+# [8.1] Pull code mới nhất từ GitHub về VPS
+cd /opt/erp
+git pull origin master
 
-# [8.2] Kiểm tra đường dẫn SSL certificate đúng domain
+# [8.2] Sửa server_name thành đúng: hrmgo.site www.hrmgo.site (cả www lẫn non-www)
+sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
+
+# [8.3] Nếu bước 8.1 vẫn còn YOUR_DOMAIN.com thì chạy thêm lệnh này trước
+sed -i 's/YOUR_DOMAIN.com/hrmgo.site/g' /opt/erp/deploy/nginx.conf
+# Rồi chạy lại bước 8.2
+
+# [8.4] Kiểm tra server_name đúng chưa
+grep "server_name" /opt/erp/deploy/nginx.conf
+# Phải thấy đúng 2 dòng:
+#   server_name hrmgo.site www.hrmgo.site;
+#   server_name hrmgo.site www.hrmgo.site;
+
+# [8.5] Kiểm tra đường dẫn SSL certificate
 grep "ssl_certificate" /opt/erp/deploy/nginx.conf
-# Phải thấy: /etc/letsencrypt/live/hrmgo.site/fullchain.pem
+# Phải thấy:
+#   ssl_certificate /etc/letsencrypt/live/hrmgo.site/fullchain.pem;
+#   ssl_certificate_key /etc/letsencrypt/live/hrmgo.site/privkey.pem;
+
+# [8.6] Đếm tổng số dòng chứa hrmgo.site - phải = 4
+grep "hrmgo.site" /opt/erp/deploy/nginx.conf | wc -l
 
 
 ────────────────────────────────────────────────────
@@ -270,6 +288,58 @@ docker compose logs -f backend
 
 
 ────────────────────────────────────────────────────
+BƯỚC 12B: SỬA LỖI - PULL CODE MỚI VÀ REBUILD BACKEND
+(Chạy bước này khi backend bị lỗi sau khi đã push fix lên GitHub)
+────────────────────────────────────────────────────
+
+# [12B.1] Vào thư mục dự án
+cd /opt/erp
+
+# [12B.2] Pull code mới - NẾU BÁO LỖI CONFLICT nginx.conf thì chạy 3 lệnh sau:
+#   error: Your local changes to the following files would be overwritten by merge:
+#           deploy/nginx.conf
+# → Giải pháp: stash (lưu tạm) thay đổi local, pull, rồi bỏ stash
+
+# Lưu tạm thay đổi nginx.conf trên VPS
+git stash
+
+# Pull code fix mới từ GitHub
+git pull origin master
+
+# Bỏ stash (không cần nữa vì repo đã có domain đúng)
+git stash drop
+
+# Chạy lại sed để đảm bảo nginx.conf có www.hrmgo.site
+sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
+
+# Kiểm tra nginx.conf đúng chưa
+grep "server_name" /opt/erp/deploy/nginx.conf
+# Phải thấy: server_name hrmgo.site www.hrmgo.site;
+
+# ── Nếu không có conflict, chỉ cần chạy lệnh này ──
+git pull origin master
+
+# [12B.3] Rebuild image backend với code mới (không rebuild db/redis)
+docker compose build backend
+
+# [12B.4] Restart backend với image mới
+docker compose up -d backend
+
+# [12B.5] Đợi 10 giây cho backend khởi động xong
+sleep 10
+
+# [12B.6] Kiểm tra trạng thái - backend phải "Up" không còn "Restarting"
+docker compose ps
+
+# [12B.7] Xem logs xác nhận không còn lỗi
+# Phải thấy:
+#   → Waiting for database...
+#   → Running migrations...
+#   → Starting Daphne server...
+docker compose logs backend --tail=20
+
+
+────────────────────────────────────────────────────
 BƯỚC 13: TẠO TÀI KHOẢN ADMIN
 ────────────────────────────────────────────────────
 
@@ -288,6 +358,72 @@ curl http://hrmgo.site/iclock/cdata?SN=test
 
 # Trình duyệt mở Django Admin
 # https://hrmgo.site/admin/
+
+
+────────────────────────────────────────────────────
+KIỂM TRA BACKEND DOCKER CÓ CHẠY KHÔNG
+────────────────────────────────────────────────────
+
+# [K.1] Xem trạng thái tất cả containers (nhanh nhất)
+cd /opt/erp && docker compose ps
+# Kết quả backend phải là: Up (healthy)  - KHÔNG phải Restarting hoặc Exit
+
+# [K.2] Xem backend đang ở trạng thái gì cụ thể
+docker inspect --format='{{.State.Status}} | health={{.State.Health.Status}}' erp-backend-1
+# Kết quả mong đợi: running | health=healthy
+
+# [K.3] Test API trực tiếp qua HTTPS
+curl -s https://hrmgo.site/api/users/me/
+# Kết quả đúng: {"detail":"Authentication credentials were not provided."}
+# Nếu trả về lỗi 502/504 → backend chưa chạy hoặc nginx lỗi
+
+# [K.4] Test API qua localhost trong VPS (bỏ qua nginx)
+curl -s http://127.0.0.1:8000/api/users/me/
+# Kết quả đúng: {"detail":"Authentication credentials were not provided."}
+# Nếu lỗi "Connection refused" → backend chưa chạy
+
+# [K.5] Test endpoint máy chấm công
+curl -s http://hrmgo.site/iclock/cdata?SN=test
+# Kết quả đúng: "GET OPTION FROM: test..."
+
+# [K.6] Xem logs backend 20 dòng cuối
+docker compose logs backend --tail=20
+# Phải thấy dòng: "HTTP/1.1 GET /api/..." hoặc "Daphne HTTP protocol..."
+# Nếu thấy lỗi Error/Exception → có bug cần fix
+
+# [K.7] Xem logs backend realtime (theo dõi trực tiếp, Ctrl+C để thoát)
+docker compose logs -f backend
+
+# [K.8] Kiểm tra port 8000 có đang lắng nghe không
+ss -tlnp | grep 8000
+# Kết quả đúng: LISTEN ... 127.0.0.1:8000
+
+# [K.9] Kiểm tra nginx có forward đúng đến backend không
+docker compose logs nginx --tail=20
+
+# [K.10] Vào bên trong container backend để debug thủ công
+docker compose exec backend bash
+# Sau khi vào trong: chạy "python manage.py check" để kiểm tra lỗi config
+# Gõ "exit" để thoát
+
+
+────────────────────────────────────────────────────
+SỬA LỖI: DisallowedHost 'localhost' (backend unhealthy)
+────────────────────────────────────────────────────
+# Nguyên nhân: Docker health check dùng localhost:8000 nhưng
+# settings_prod.py chỉ có hrmgo.site trong ALLOWED_HOSTS
+# → Fix: thêm localhost + 127.0.0.1 vào settings_prod.py (đã fix trong code)
+# → Sau đó pull và rebuild backend:
+
+cd /opt/erp
+git stash
+git pull origin master
+git stash drop
+sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
+docker compose build backend
+docker compose up -d backend
+sleep 15 && docker compose ps
+# Backend phải chuyển từ "unhealthy" → "healthy"
 
 
 ────────────────────────────────────────────────────
