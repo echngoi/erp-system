@@ -57,6 +57,7 @@ services:
       - backend_media:/var/www/media:ro
       - certbot_conf:/etc/letsencrypt:ro
       - certbot_www:/var/www/certbot:ro
+      - ./frontend/dist:/var/www/frontend:ro
     ports:
       - "80:80"
       - "443:443"
