@@ -483,6 +483,59 @@ free -h
 # Xem containers đang chạy
 docker ps
 
+
+────────────────────────────────────────────────────
+SỬA LỖI: FE VERCEL KHÔNG KẾT NỐI ĐƯỢC BE (CORS)
+────────────────────────────────────────────────────
+# Nguyên nhân: Trình duyệt gửi OPTIONS preflight request trước mỗi API call.
+# Nếu Nginx không trả CORS headers → preflight fail → "Không kết nối được máy chủ"
+
+# [C.1] Pull code mới (đã fix CORS trong nginx.conf)
+cd /opt/erp
+git stash
+git pull origin master
+git stash drop
+sed -i 's/server_name hrmgo.site;/server_name hrmgo.site www.hrmgo.site;/g' /opt/erp/deploy/nginx.conf
+
+# [C.2] Kiểm tra .env.production có domain Vercel đúng trong CORS
+cat /opt/erp/backend/.env.production | grep CORS
+# Phải chứa domain Vercel: https://erp-system-nine-zeta.vercel.app
+# ⚠️ Kiểm tra kỹ: phải là .vercel.app (có chữ p cuối) KHÔNG PHẢI .vercel.ap
+
+# Nếu thiếu hoặc sai → sửa lại:
+nano /opt/erp/backend/.env.production
+# Sửa dòng CORS_ALLOWED_ORIGINS thành:
+# CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site,https://erp-system-nine-zeta.vercel.app
+# Lưu: Ctrl+O → Enter → Ctrl+X
+
+# [C.3] Restart nginx (vì nginx.conf đã thay đổi)
+docker compose restart nginx
+
+# [C.4] Restart backend (vì .env.production đã thay đổi)
+docker compose restart backend
+
+# [C.5] Đợi backend healthy
+sleep 15 && docker compose ps
+
+# [C.6] Test CORS preflight từ VPS
+curl -v -X OPTIONS \
+  -H "Origin: https://erp-system-nine-zeta.vercel.app" \
+  -H "Access-Control-Request-Method: POST" \
+  -H "Access-Control-Request-Headers: Content-Type,Authorization" \
+  https://hrmgo.site/api/auth/login/ 2>&1 | grep -i "access-control"
+# Kết quả đúng phải thấy:
+#   Access-Control-Allow-Origin: https://erp-system-nine-zeta.vercel.app
+#   Access-Control-Allow-Methods: GET, POST, PUT, PATCH, DELETE, OPTIONS
+#   Access-Control-Allow-Credentials: true
+
+# [C.7] Test login thực tế
+curl -s -X POST \
+  -H "Content-Type: application/json" \
+  -H "Origin: https://erp-system-nine-zeta.vercel.app" \
+  -d '{"username":"admin","password":"matkhau"}' \
+  https://hrmgo.site/api/auth/login/
+# Phải trả về JSON có access token (hoặc lỗi auth nếu sai password — không phải CORS error)
+
 ────────────────────────────────────────────────────
 BƯỚC 15: KIỂM TRA BACKEND ĐÃ HOẠT ĐỘNG CHƯA (BỎ QUA MIGRATE SQLITE)
 ────────────────────────────────────────────────────
