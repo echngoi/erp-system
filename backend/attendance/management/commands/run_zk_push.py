@@ -49,15 +49,15 @@ CLIENT_TIMEOUT = 300  # 5 minutes
 _register_strategy_counter = 0
 
 REGISTER_STRATEGIES = [
-    "ZERO_SN",          # 0: Full 48B, SN bytes (16-35) all zeros
-    "SERVER_SN",         # 1: Full 48B, SN = "SERVER" instead of device SN
-    "ACK_THEN_CLOSE",   # 2: Standard ACK then immediately close socket
-    "STD_ZK_ACK",       # 3: Standard ZK protocol: 50 50 82 7D + CMD_ACK_OK
-    "CMD_07D0",          # 4: A5 5A with cmd=0x07D0 (standard ZK ACK_OK)
-    "CHKSUM_ZERO",       # 5: Correct ACK but checksum = 0x00 (test validation)
-    "ONLY_4B",           # 6: Just a5 5a 02 00 (4 bytes)
-    "RAW_OK",            # 7: Send text "OK\r\n" (not binary)
-    "PAYLOAD_DATA",      # 8: Baseline + fill payload with ZK timestamp + counter
+    "HTTP_200",          # 0: HTTP/1.1 200 OK (maybe device expects HTTP?)
+    "HTTP_ADMS",         # 1: Full ADMS handshake response
+    "SIZE_20B",          # 2: 20-byte A5 5A (header + 4 past SN start)
+    "SIZE_24B",          # 3: 24-byte A5 5A
+    "SIZE_28B",          # 4: 28-byte A5 5A
+    "SIZE_32B",          # 5: 32-byte A5 5A
+    "DIFF_MAGIC_48B",   # 6: 48B but magic = 5A A5 (reversed) — test magic parsing
+    "SESSION_NONZERO",  # 7: Full 48B with session bytes[8-11] = random non-zero
+    "HTTP_BIN_WRAP",    # 8: HTTP 200 with binary A5 5A body
     "NO_RESPONSE",       # 9: Control — send nothing
 ]
 
@@ -205,95 +205,88 @@ class ZKPushClientHandler:
             logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
             return
 
-        # ── RAW_OK: send plain text "OK\r\n" ──
-        if strategy == "RAW_OK":
-            ack = b"OK\r\n"
-            logger.info(f"[ZK-TCP] Sending RAW_OK ({len(ack)}B): {ack!r}")
+        # ── HTTP_200: plain HTTP 200 response ──
+        if strategy == "HTTP_200":
+            ack = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
+            logger.info(f"[ZK-TCP] Sending HTTP_200 ({len(ack)}B)")
             await self._send(ack)
             return
 
-        # ── STD_ZK_ACK: standard ZK protocol format 50 50 82 7D + CMD_ACK_OK ──
-        if strategy == "STD_ZK_ACK":
-            # Standard ZK: header(4B) + payload_size(4B) + payload(8B)
-            # payload: cmd_ack_ok(2B) + checksum(2B) + session(2B) + reply_num(2B)
-            payload = bytearray(8)
-            struct.pack_into('<H', payload, 0, 0x07D0)  # CMD_ACK_OK
-            # checksum: ones-complement of sum of 16-bit words
-            struct.pack_into('<H', payload, 4, 0x0000)  # session
-            struct.pack_into('<H', payload, 6, 0x0000)  # reply_num
-            # Simple checksum calc
-            chk = 0
-            for i in range(0, 8, 2):
-                if i != 2:  # skip checksum position
-                    chk += struct.unpack_from('<H', payload, i)[0]
-            chk = (chk & 0xFFFF) + ((chk >> 16) & 0xFFFF)
-            chk = chk ^ 0xFFFF
-            struct.pack_into('<H', payload, 2, chk)
-            # Build full packet: header + payload_size + payload
-            ack = b'\x50\x50\x82\x7d'
-            ack += struct.pack('<I', len(payload))
-            ack += bytes(payload)
-            logger.info(f"[ZK-TCP] Sending STD_ZK_ACK ({len(ack)}B): {ack.hex()}")
+        # ── HTTP_ADMS: full ADMS-style handshake response ──
+        if strategy == "HTTP_ADMS":
+            body = (
+                f"GET OPTION FROM: {packet.serial_number}\r\n"
+                f"Stamp=9999\r\n"
+                f"OpStamp=9999\r\n"
+                f"ErrorDelay=60\r\n"
+                f"Delay=30\r\n"
+                f"Realtime=1\r\n"
+                f"Encrypt=0\r\n"
+            )
+            ack = (
+                f"HTTP/1.1 200 OK\r\n"
+                f"Content-Type: text/plain\r\n"
+                f"Content-Length: {len(body)}\r\n"
+                f"\r\n"
+                f"{body}"
+            ).encode('utf-8')
+            logger.info(f"[ZK-TCP] Sending HTTP_ADMS ({len(ack)}B)")
             await self._send(ack)
             return
 
-        # ── ONLY_4B: just magic + cmd ──
-        if strategy == "ONLY_4B":
-            ack = b'\xa5\x5a\x02\x00'
-            logger.info(f"[ZK-TCP] Sending ONLY_4B ({len(ack)}B): {ack.hex()}")
+        # ── HTTP_BIN_WRAP: HTTP 200 wrapping a binary A5 5A ACK in body ──
+        if strategy == "HTTP_BIN_WRAP":
+            bin_ack = bytearray(packet.raw)
+            struct.pack_into('<H', bin_ack, 2, CMD_REGISTER_ACK)
+            _apply_checksum(bin_ack)
+            bin_body = bytes(bin_ack)
+            header = (
+                f"HTTP/1.1 200 OK\r\n"
+                f"Content-Type: application/octet-stream\r\n"
+                f"Content-Length: {len(bin_body)}\r\n"
+                f"\r\n"
+            ).encode('utf-8')
+            ack = header + bin_body
+            logger.info(f"[ZK-TCP] Sending HTTP_BIN_WRAP ({len(ack)}B)")
             await self._send(ack)
             return
 
-        # ── All remaining strategies start with echo + cmd change ──
-        ack = bytearray(packet.raw)
-        struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd = 0x0002
-
-        if strategy == "ZERO_SN":
-            # Zero out SN bytes (16-35) — test if echoing device SN causes RST
-            for i in range(16, 36):
-                ack[i] = 0x00
-
-        elif strategy == "SERVER_SN":
-            # Use a different SN in the response
-            server_sn = b'SERVER\x00' + b'\x00' * 13  # 20 bytes total
-            ack[16:36] = server_sn
-
-        elif strategy == "CMD_07D0":
-            # Use standard ZK CMD_ACK_OK (0x07D0) instead of 0x0002
-            struct.pack_into('<H', ack, 2, 0x07D0)
-
-        elif strategy == "CHKSUM_ZERO":
-            # Set checksum to 0x00 INTENTIONALLY — test if device validates it
-            _apply_checksum(ack)  # first compute correct
-            ack[14] = 0x00  # then corrupt it
-            logger.warning(f"[ZK-TCP] CHKSUM_ZERO: deliberately zeroed checksum")
-
-        elif strategy == "PAYLOAD_DATA":
-            # Fill payload with timestamp + incremental counter
-            zk_ts = int(time.time()) - 946684800
-            struct.pack_into('<I', ack, 36, zk_ts)
-            struct.pack_into('<I', ack, 40, _register_strategy_counter)
-
-        # Recompute checksum (unless CHKSUM_ZERO which deliberately corrupts it)
-        if strategy != "CHKSUM_ZERO":
+        # ── SIZE_NNB: Truncated A5 5A packet to find RST size boundary ──
+        # Known: 16B → FIN, 36B → RST. Test 20, 24, 28, 32 to narrow.
+        size_map = {"SIZE_20B": 20, "SIZE_24B": 24, "SIZE_28B": 28, "SIZE_32B": 32}
+        if strategy in size_map:
+            target_size = size_map[strategy]
+            ack = bytearray(packet.raw[:target_size])
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
             _apply_checksum(ack)
-
-        ack_bytes = bytes(ack)
-
-        # ACK_THEN_CLOSE: send then immediately close
-        if strategy == "ACK_THEN_CLOSE":
-            logger.info(f"[ZK-TCP] Sending ACK_THEN_CLOSE ({len(ack_bytes)}B): {ack_bytes.hex()}")
+            ack_bytes = bytes(ack)
+            logger.info(f"[ZK-TCP] Sending {strategy} ({len(ack_bytes)}B): {ack_bytes.hex()}")
             await self._send(ack_bytes)
-            try:
-                self.writer.close()
-                await self.writer.wait_closed()
-            except Exception:
-                pass
-            logger.warning(f"[ZK-TCP] ACK_THEN_CLOSE: socket closed after send")
             return
 
-        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack_bytes)}B) [{strategy}]: {ack_bytes.hex()}")
-        await self._send(ack_bytes)
+        # ── DIFF_MAGIC_48B: 48 bytes but magic reversed (5A A5) ──
+        # Tests: does device RST on ANY 48B, or only when magic is A5 5A?
+        if strategy == "DIFF_MAGIC_48B":
+            ack = bytearray(packet.raw)
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            _apply_checksum(ack)
+            ack[0] = 0x5a  # Reverse magic: 5A A5 instead of A5 5A
+            ack[1] = 0xa5
+            ack_bytes = bytes(ack)
+            logger.info(f"[ZK-TCP] Sending DIFF_MAGIC_48B ({len(ack_bytes)}B): {ack_bytes.hex()}")
+            await self._send(ack_bytes)
+            return
+
+        # ── SESSION_NONZERO: set bytes[8-11] to non-zero session ID ──
+        if strategy == "SESSION_NONZERO":
+            ack = bytearray(packet.raw)
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            # Assign a session: use counter as session_id
+            struct.pack_into('<I', ack, 8, 0x00010001)
+            _apply_checksum(ack)
+            ack_bytes = bytes(ack)
+            logger.info(f"[ZK-TCP] Sending SESSION_NONZERO ({len(ack_bytes)}B): {ack_bytes.hex()}")
+            await self._send(ack_bytes)
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
