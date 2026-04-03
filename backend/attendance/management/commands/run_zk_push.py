@@ -191,8 +191,17 @@ class ZKPushClientHandler:
         # From Mita Pro capture: heartbeat ACKs use echo seq (not seq+1)
         if self.registered:
             _device_last_ack_time[ip] = now
-            logger.info(f"[ZK-TCP] 💓 Heartbeat REGISTER from SN={packet.serial_number} "
-                        f"seq={packet.send_seq} — sending echo ACK")
+
+            # Log extra detail when session/flags differ from normal heartbeat
+            session_hex = raw[8:12].hex()
+            flags_hex = raw[12:16].hex()
+            if session_hex != '00000000' or raw[12] != 0x00:
+                logger.warning(f"[ZK-TCP] 📦 Non-standard heartbeat from SN={packet.serial_number} "
+                               f"seq={packet.send_seq} session={session_hex} flags={flags_hex} "
+                               f"raw={raw.hex()}")
+            else:
+                logger.info(f"[ZK-TCP] 💓 Heartbeat REGISTER from SN={packet.serial_number} "
+                            f"seq={packet.send_seq} — sending echo ACK")
 
             # Update device contact (write shared file every ~30s, not every 3s)
             if not hasattr(self, '_last_contact_write') or (now - self._last_contact_write) > 30:
@@ -294,9 +303,9 @@ class ZKPushClientHandler:
         if records:
             saved, new_records = await self._save_attendance_records(records)
 
-        # Send ACK
-        self.server_seq = (self.server_seq + 1) & 0xFF
-        ack = build_data_ack(packet, CMD_PUSH_ATTLOG_ACK, self.server_seq, saved)
+        # Send 16-byte ACK (same format as REGISTER ACK)
+        ack = self._build_16byte_ack(packet.raw)
+        logger.info(f"[ZK-TCP] Sending ATTLOG ACK (16B): {ack.hex()}")
         await self._send(ack)
 
         # Push to frontend via WebSocket
@@ -313,9 +322,8 @@ class ZKPushClientHandler:
         if packet.payload:
             logger.info(f"[ZK-TCP] USERINFO payload hex: {packet.payload[:160].hex()}")
 
-        # ACK
-        self.server_seq = (self.server_seq + 1) & 0xFF
-        ack = build_data_ack(packet, CMD_PUSH_USERINFO_ACK, self.server_seq, 0)
+        # Send 16-byte ACK
+        ack = self._build_16byte_ack(packet.raw)
         await self._send(ack)
 
     async def _handle_operlog(self, packet):
@@ -323,8 +331,7 @@ class ZKPushClientHandler:
         logger.info(f"[ZK-TCP] OPERLOG from SN={self.serial_number} "
                      f"payload={len(packet.payload)}B")
 
-        self.server_seq = (self.server_seq + 1) & 0xFF
-        ack = build_data_ack(packet, CMD_PUSH_OPERLOG_ACK, self.server_seq, 0)
+        ack = self._build_16byte_ack(packet.raw)
         await self._send(ack)
 
     async def _handle_unknown(self, packet):
@@ -352,6 +359,26 @@ class ZKPushClientHandler:
                     await self._notify_websocket(new_records)
                 logger.warning(f"[ZK-TCP] Unknown cmd had parseable ATTLOG! "
                                f"saved={saved}")
+
+    def _build_16byte_ack(self, raw: bytes) -> bytes:
+        """Build standard 16-byte reversed-magic ACK for any packet.
+
+        Same format as REGISTER ACK — verified from Mita Pro capture:
+        5A A5 + echo cmd + echo seq + echo recv_seq + echo proto +
+        echo session + 32 01 + checksum + echo footer
+        """
+        ack = bytearray(16)
+        ack[0:2] = b'\x5a\xa5'
+        ack[2:4] = raw[2:4]               # Echo command
+        ack[4] = raw[4]                    # Echo seq
+        ack[5] = raw[5]                    # Echo recv_seq
+        ack[6:8] = raw[6:8]               # Echo proto_ver
+        ack[8:12] = raw[8:12]             # Echo session
+        ack[12] = 0x32                     # ACK status
+        ack[13] = 0x01                     # Fixed
+        ack[14] = sum(ack[0:14]) & 0xFF    # Checksum
+        ack[15] = raw[15] if len(raw) > 15 else 0x02  # Echo footer
+        return bytes(ack)
 
     async def _send(self, data: bytes):
         """Send data to the device."""
