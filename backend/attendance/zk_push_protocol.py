@@ -64,6 +64,9 @@ CMD_NAMES = {
     CMD_PUSH_OPERLOG_ACK: 'PUSH_OPERLOG_ACK',
 }
 
+# ZK epoch: 2000-01-01 00:00:00 UTC (seconds between Unix epoch and ZK epoch)
+ZK_EPOCH_OFFSET = 946684800
+
 # Attendance record size (common ZK binary formats)
 ATTLOG_RECORD_SIZES = [8, 12, 16, 40]  # Varies by firmware
 
@@ -75,12 +78,18 @@ class ZKPacket:
     """Parsed ZK Push Protocol packet."""
     raw: bytes
     command: int
-    send_seq: int
-    proto_id: bytes
+    send_seq: int       # byte 4: device's send counter
+    recv_seq: int       # byte 5: device's receive counter
+    proto_ver: bytes    # bytes 6-7: protocol version (e.g. b'b1')
     session: bytes
     flags: bytes
     serial_number: str
     payload: bytes = b''
+
+    @property
+    def proto_id(self):
+        """Legacy: combine recv_seq char + proto_ver for display."""
+        return bytes([self.recv_seq]) + self.proto_ver
 
     @property
     def cmd_name(self):
@@ -143,7 +152,8 @@ def parse_packet(data: bytes) -> Optional[ZKPacket]:
 
     command = struct.unpack_from('<H', data, 2)[0]
     send_seq = data[4] if len(data) > 4 else 0
-    proto_id = data[5:8] if len(data) >= 8 else b''
+    recv_seq = data[5] if len(data) > 5 else 0
+    proto_ver = data[6:8] if len(data) >= 8 else b'b1'
     session = data[8:12] if len(data) >= 12 else b'\x00' * 4
     flags = data[12:16] if len(data) >= 16 else b'\x00' * 4
 
@@ -160,7 +170,8 @@ def parse_packet(data: bytes) -> Optional[ZKPacket]:
         raw=data,
         command=command,
         send_seq=send_seq,
-        proto_id=proto_id,
+        recv_seq=recv_seq,
+        proto_ver=proto_ver,
         session=session,
         flags=flags,
         serial_number=serial_number,
@@ -170,8 +181,8 @@ def parse_packet(data: bytes) -> Optional[ZKPacket]:
 
 # ── Response Building ──────────────────────────────────────────────────────────
 
-def build_response(packet: ZKPacket, resp_cmd: int, payload: bytes = b'') -> bytes:
-    """Build a response packet mirroring the request structure."""
+def build_response(packet: ZKPacket, resp_cmd: int, server_seq: int = 0, payload: bytes = b'') -> bytes:
+    """Build a response packet with correct sequence handling."""
     header = bytearray(HEADER_SIZE)
 
     # Magic
@@ -180,12 +191,13 @@ def build_response(packet: ZKPacket, resp_cmd: int, payload: bytes = b'') -> byt
     # Response command
     struct.pack_into('<H', header, 2, resp_cmd)
 
-    # Mirror sequence number
-    header[4] = packet.send_seq
+    # Sequence counters (critical for device acceptance)
+    header[4] = server_seq & 0xFF          # Server's own send counter
+    header[5] = packet.send_seq & 0xFF     # Acknowledge device's send_seq
 
-    # Protocol ID
-    pid = packet.proto_id if len(packet.proto_id) >= 3 else b'kb1'
-    header[5:8] = pid[:3]
+    # Protocol version (bytes 6-7)
+    pv = packet.proto_ver if len(packet.proto_ver) >= 2 else b'b1'
+    header[6:8] = pv[:2]
 
     # Mirror session
     if len(packet.session) >= 4:
@@ -202,23 +214,23 @@ def build_response(packet: ZKPacket, resp_cmd: int, payload: bytes = b'') -> byt
     return bytes(header) + payload
 
 
-def build_register_ack(packet: ZKPacket) -> bytes:
-    """Build registration ACK with timestamp payload."""
-    # Build timestamp payload: current time as 4-byte unix timestamp
-    now_ts = int(datetime.now().timestamp())
+def build_register_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
+    """Build registration ACK with ZK epoch timestamp payload."""
+    # ZK machines expect seconds since 2000-01-01, NOT Unix epoch
+    now_ts = int(datetime.now().timestamp()) - ZK_EPOCH_OFFSET
     ts_payload = struct.pack('<I', now_ts)
-    return build_response(packet, CMD_REGISTER_ACK, ts_payload)
+    return build_response(packet, CMD_REGISTER_ACK, server_seq, ts_payload)
 
 
-def build_heartbeat_ack(packet: ZKPacket) -> bytes:
+def build_heartbeat_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
     """Build heartbeat ACK."""
-    return build_response(packet, CMD_HEARTBEAT_ACK)
+    return build_response(packet, CMD_HEARTBEAT_ACK, server_seq)
 
 
-def build_data_ack(packet: ZKPacket, cmd_ack: int, count: int = 0) -> bytes:
+def build_data_ack(packet: ZKPacket, cmd_ack: int, server_seq: int = 0, count: int = 0) -> bytes:
     """Build data push ACK with record count."""
     count_payload = struct.pack('<I', count)
-    return build_response(packet, cmd_ack, count_payload)
+    return build_response(packet, cmd_ack, server_seq, count_payload)
 
 
 # ── Attendance Data Parsing ────────────────────────────────────────────────────

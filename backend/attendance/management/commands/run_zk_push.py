@@ -164,7 +164,11 @@ class ZKPushClientHandler:
     async def _handle_register(self, packet):
         """Handle device registration/handshake."""
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
-                       f"seq={packet.send_seq} proto={packet.proto_id}")
+                       f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
+                       f"proto_ver={packet.proto_ver}")
+        logger.info(f"[ZK-TCP] REGISTER raw ({len(packet.raw)}B): {packet.raw.hex()}")
+        if packet.payload:
+            logger.info(f"[ZK-TCP] REGISTER payload ({len(packet.payload)}B): {packet.payload.hex()}")
 
         self.registered = True
         self.serial_number = packet.serial_number
@@ -172,10 +176,10 @@ class ZKPushClientHandler:
         # Record contact in device registry
         await self._record_device_contact()
 
-        # Send ACK — try multiple response formats
-        # Strategy 1: Structured ACK with timestamp
-        ack = build_register_ack(packet)
-        logger.info(f"[ZK-TCP] Sending REGISTER_ACK: {ack.hex()}")
+        # Send ACK with proper sequence and ZK epoch timestamp
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_register_ack(packet, self.server_seq)
+        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack)}B): {ack.hex()}")
         await self._send(ack)
 
     async def _handle_heartbeat(self, packet):
@@ -183,7 +187,8 @@ class ZKPushClientHandler:
         logger.debug(f"[ZK-TCP] Heartbeat from SN={self.serial_number}")
         await self._record_device_contact()
 
-        ack = build_heartbeat_ack(packet)
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_heartbeat_ack(packet, self.server_seq)
         await self._send(ack)
 
     async def _handle_attlog(self, packet):
@@ -210,7 +215,8 @@ class ZKPushClientHandler:
             saved, new_records = await self._save_attendance_records(records)
 
         # Send ACK
-        ack = build_data_ack(packet, CMD_PUSH_ATTLOG_ACK, saved)
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_data_ack(packet, CMD_PUSH_ATTLOG_ACK, self.server_seq, saved)
         await self._send(ack)
 
         # Push to frontend via WebSocket
@@ -228,7 +234,8 @@ class ZKPushClientHandler:
             logger.info(f"[ZK-TCP] USERINFO payload hex: {packet.payload[:160].hex()}")
 
         # ACK
-        ack = build_data_ack(packet, CMD_PUSH_USERINFO_ACK, 0)
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_data_ack(packet, CMD_PUSH_USERINFO_ACK, self.server_seq, 0)
         await self._send(ack)
 
     async def _handle_operlog(self, packet):
@@ -236,7 +243,8 @@ class ZKPushClientHandler:
         logger.info(f"[ZK-TCP] OPERLOG from SN={self.serial_number} "
                      f"payload={len(packet.payload)}B")
 
-        ack = build_data_ack(packet, CMD_PUSH_OPERLOG_ACK, 0)
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_data_ack(packet, CMD_PUSH_OPERLOG_ACK, self.server_seq, 0)
         await self._send(ack)
 
     async def _handle_unknown(self, packet):
@@ -246,7 +254,8 @@ class ZKPushClientHandler:
 
         # Try responding with command + 1 (common ACK pattern)
         ack_cmd = packet.command + 1
-        ack = build_response(packet, ack_cmd)
+        self.server_seq = (self.server_seq + 1) & 0xFF
+        ack = build_response(packet, ack_cmd, self.server_seq)
         await self._send(ack)
 
         # Also log payload for analysis
