@@ -162,7 +162,23 @@ class ZKPushClientHandler:
             await self._handle_unknown(packet)
 
     async def _handle_register(self, packet):
-        """Handle device registration/handshake."""
+        """Handle device registration/handshake.
+
+        Strategy: Try multiple ACK formats. The device resets connection
+        if the ACK format is wrong. We cycle through strategies to find
+        the one that works.
+
+        Known facts from packet analysis:
+          - Device sends 48B: 36B header + 12B zero payload
+          - Byte 4 = send_seq (increments), Byte 5 = recv_seq (0x80+)
+          - proto_ver = b'b1'
+
+        Strategies tried:
+          1. Custom header + timestamp payload (40B) → RESET
+          2. Echo raw 48B, change cmd only → RESET
+          3. No response (keep connection alive) → testing now
+          4. Header-only 36B, swap sequences → fallback
+        """
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
                        f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
                        f"proto_ver={packet.proto_ver}")
@@ -176,11 +192,14 @@ class ZKPushClientHandler:
         # Record contact in device registry
         await self._record_device_contact()
 
-        # Send ACK with proper sequence and ZK epoch timestamp
-        self.server_seq = (self.server_seq + 1) & 0xFF
-        ack = build_register_ack(packet, self.server_seq)
-        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack)}B): {ack.hex()}")
-        await self._send(ack)
+        # ──────────────────────────────────────────────────────────────
+        # STRATEGY 3: Do NOT send any ACK.
+        # Just keep the TCP connection alive and wait.
+        # If device needs no ACK, it will stay connected and send
+        # heartbeat or ATTLOG data next.
+        # ──────────────────────────────────────────────────────────────
+        logger.warning(f"[ZK-TCP] Strategy: NOT sending ACK, keeping connection alive. "
+                       f"Waiting for device to send next packet...")
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
