@@ -19,6 +19,7 @@ import asyncio
 import logging
 import signal
 import struct
+import time
 from datetime import datetime
 
 from django.core.management.base import BaseCommand
@@ -48,14 +49,16 @@ CLIENT_TIMEOUT = 300  # 5 minutes
 _register_strategy_counter = 0
 
 REGISTER_STRATEGIES = [
-    "SEQ_SWAP",        # 0: Swap byte[4]↔byte[5] (server seq ↔ device seq)
-    "NO_RESPONSE",     # 1: Send nothing — wait for device's next packet
-    "DELAYED_2S",      # 2: Baseline ACK but after 2-second delay
-    "FLAG_00",         # 3: Set byte[13]=0x00 (direction flag?)
-    "HEADER_36B",      # 4: Only 36 bytes — no payload section
-    "SEQ_SWAP_FLAG00", # 5: Swap seqs + byte[13]=0x00 (combo)
-    "FRESH_SEQ",       # 6: byte[4]=0x01, byte[5]=device.send_seq
-    "CMD_8001",        # 7: Use cmd=0x8001 instead of 0x0002
+    "CLOSE_FIN",       # 0: Close TCP connection immediately (device gets FIN)
+    "ECHO_EXACT",      # 1: Echo packet unchanged (no cmd change at all)
+    "SESSION_01",      # 2: Assign session ID bytes[8:12] = 01000000
+    "HEADER_16B",      # 3: Only first 16 bytes (header, no SN, no payload)
+    "FLAG_02",         # 4: Set byte[13]=0x02 (different direction flag)
+    "ACK_NEXT_SEQ",    # 5: Set byte[5] = device_send_seq + 1 (ack window)
+    "TIMESTAMP_PL",    # 6: Baseline + fill payload with ZK timestamp
+    "ZERO_CMD",        # 7: cmd=0x0000 instead of 0x0002
+    "NO_RESPONSE",     # 8: Send nothing, keep connection open
+    "COMBO_SESSION",   # 9: Session + flag_02 + ack_next_seq
 ]
 
 
@@ -197,55 +200,73 @@ class ZKPushClientHandler:
         self.serial_number = packet.serial_number
         await self._record_device_contact()
 
-        if strategy == "NO_RESPONSE":
-            logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing, waiting for next packet")
+        # ── CLOSE_FIN: close TCP socket immediately (server-initiated FIN) ──
+        if strategy == "CLOSE_FIN":
+            logger.warning(f"[ZK-TCP] Strategy CLOSE_FIN: closing connection immediately")
+            try:
+                self.writer.close()
+                await self.writer.wait_closed()
+            except Exception:
+                pass
             return
 
-        # Build ACK based on strategy
+        # ── NO_RESPONSE: send nothing, keep connection open ──
+        if strategy == "NO_RESPONSE":
+            logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
+            return
+
+        # ── ECHO_EXACT: echo the exact raw packet unchanged ──
+        if strategy == "ECHO_EXACT":
+            ack = bytes(packet.raw)
+            logger.info(f"[ZK-TCP] Sending ECHO_EXACT ({len(ack)}B): {ack.hex()}")
+            await self._send(ack)
+            return
+
+        # ── All other strategies start with baseline echo + cmd change ──
         ack = bytearray(packet.raw)
         struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd = 0x0002
 
-        if strategy == "SEQ_SWAP":
-            # Swap byte[4] and byte[5]: server sends device's recv_seq as its send_seq
-            ack[4], ack[5] = packet.recv_seq, packet.send_seq
+        if strategy == "SESSION_01":
+            # Assign a server session ID (device sends 00000000)
+            ack[8] = 0x01
+            ack[9] = 0x00
+            ack[10] = 0x00
+            ack[11] = 0x00
 
-        elif strategy == "DELAYED_2S":
-            pass  # Will delay below, no field changes beyond cmd
+        elif strategy == "FLAG_02":
+            # byte[13] = 0x02 (maybe: 0x01=request, 0x02=response)
+            ack[13] = 0x02
 
-        elif strategy == "FLAG_00":
-            # Set byte[13] = 0x00 (maybe 0x01 = "from device", 0x00 = "from server")
-            ack[13] = 0x00
+        elif strategy == "ACK_NEXT_SEQ":
+            # Set byte[5] = device's send_seq + 1 (TCP-like ack number)
+            ack[5] = (packet.send_seq + 1) & 0xFF
 
-        elif strategy == "HEADER_36B":
-            pass  # Will truncate below
+        elif strategy == "TIMESTAMP_PL":
+            # Fill payload (bytes 36-47) with current ZK timestamp
+            zk_ts = int(time.time()) - 946684800  # Unix → ZK epoch
+            struct.pack_into('<I', ack, 36, zk_ts)
 
-        elif strategy == "SEQ_SWAP_FLAG00":
-            ack[4], ack[5] = packet.recv_seq, packet.send_seq
-            ack[13] = 0x00
+        elif strategy == "ZERO_CMD":
+            # cmd = 0x0000 instead of 0x0002
+            struct.pack_into('<H', ack, 2, 0x0000)
 
-        elif strategy == "FRESH_SEQ":
-            # Server uses its own fresh seq=1, acknowledges device's send_seq
-            ack[4] = 0x01
-            ack[5] = packet.send_seq
+        elif strategy == "COMBO_SESSION":
+            # Combine: session + flag_02 + ack_next_seq
+            ack[8] = 0x01
+            ack[9] = 0x00
+            ack[10] = 0x00
+            ack[11] = 0x00
+            ack[13] = 0x02
+            ack[5] = (packet.send_seq + 1) & 0xFF
 
-        elif strategy == "CMD_8001":
-            # Some protocols use high-bit for response: 0x8001
-            struct.pack_into('<H', ack, 2, 0x8001)
-
-        # Recompute checksum after all field changes
+        # Recompute checksum for all field changes
         _apply_checksum(ack)
 
-        # Truncate for header-only strategy
-        if strategy == "HEADER_36B":
-            ack = ack[:HEADER_SIZE]
+        # Truncate for HEADER_16B
+        if strategy == "HEADER_16B":
+            ack = ack[:16]
 
         ack = bytes(ack)
-
-        # Delay for DELAYED_2S strategy
-        if strategy == "DELAYED_2S":
-            logger.warning(f"[ZK-TCP] Strategy DELAYED_2S: waiting 2s before sending ACK")
-            await asyncio.sleep(2.0)
-
         logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack)}B) [{strategy}]: {ack.hex()}")
         await self._send(ack)
 
