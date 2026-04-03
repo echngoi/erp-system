@@ -184,8 +184,9 @@ class ZKPushClientHandler:
         ack = bytearray(16)
         ack[0:2] = b'\x5a\xa5'           # Reversed magic (server→device)
         ack[2:4] = raw[2:4]              # Echo command (01 00 = REGISTER)
-        ack[4] = (raw[4] + 2) & 0xFF     # Sequence + 2
-        ack[5:8] = raw[5:8]              # Echo recv_seq + proto_ver ("b1")
+        ack[4] = (raw[4] + 2) & 0xFF     # Server send_seq = client_seq + 2
+        ack[5] = raw[4]                   # Server recv_seq = client's send_seq (ACK receipt)
+        ack[6:8] = raw[6:8]              # Echo proto_ver ("b1")
         ack[8:12] = raw[8:12]            # Echo session/comm-key bytes from client
         ack[12] = 0x32                    # ACK status code
         ack[13] = 0x01                    # Fixed
