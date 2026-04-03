@@ -33,12 +33,30 @@ from attendance.zk_push_protocol import (
     parse_packet, find_packets,
     build_register_ack, build_heartbeat_ack, build_data_ack, build_response,
     parse_attlog_payload, parse_attlog_text_in_binary,
+    _compute_checksum, _apply_checksum,
 )
 
 logger = logging.getLogger('attendance.zk_push')
 
 # Timeout: close connection if no data for this many seconds
 CLIENT_TIMEOUT = 300  # 5 minutes
+
+# ── REGISTER ACK strategy rotation ────────────────────────────────────────────
+# Device RSTs with basic "echo + change cmd + checksum" approach.
+# We try multiple strategies to discover what the device expects.
+# Device reconnects every ~30ms so all strategies are tested quickly.
+_register_strategy_counter = 0
+
+REGISTER_STRATEGIES = [
+    "SEQ_SWAP",        # 0: Swap byte[4]↔byte[5] (server seq ↔ device seq)
+    "NO_RESPONSE",     # 1: Send nothing — wait for device's next packet
+    "DELAYED_2S",      # 2: Baseline ACK but after 2-second delay
+    "FLAG_00",         # 3: Set byte[13]=0x00 (direction flag?)
+    "HEADER_36B",      # 4: Only 36 bytes — no payload section
+    "SEQ_SWAP_FLAG00", # 5: Swap seqs + byte[13]=0x00 (combo)
+    "FRESH_SEQ",       # 6: byte[4]=0x01, byte[5]=device.send_seq
+    "CMD_8001",        # 7: Use cmd=0x8001 instead of 0x0002
+]
 
 
 class ZKPushClientHandler:
@@ -162,19 +180,73 @@ class ZKPushClientHandler:
             await self._handle_unknown(packet)
 
     async def _handle_register(self, packet):
-        """Handle device registration/handshake."""
+        """Handle device registration — try multiple ACK strategies."""
+        global _register_strategy_counter
+
+        strategy_idx = _register_strategy_counter % len(REGISTER_STRATEGIES)
+        strategy = REGISTER_STRATEGIES[strategy_idx]
+        _register_strategy_counter += 1
+
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
                        f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
                        f"proto_ver={packet.proto_ver}")
         logger.info(f"[ZK-TCP] REGISTER raw ({len(packet.raw)}B): {packet.raw.hex()}")
+        logger.warning(f"[ZK-TCP] ▶ Strategy #{strategy_idx}: {strategy}")
 
         self.registered = True
         self.serial_number = packet.serial_number
         await self._record_device_contact()
 
-        # Send ACK: echo raw packet, change cmd to 0x0002, recompute checksum
-        ack = build_register_ack(packet)
-        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack)}B): {ack.hex()}")
+        if strategy == "NO_RESPONSE":
+            logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing, waiting for next packet")
+            return
+
+        # Build ACK based on strategy
+        ack = bytearray(packet.raw)
+        struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd = 0x0002
+
+        if strategy == "SEQ_SWAP":
+            # Swap byte[4] and byte[5]: server sends device's recv_seq as its send_seq
+            ack[4], ack[5] = packet.recv_seq, packet.send_seq
+
+        elif strategy == "DELAYED_2S":
+            pass  # Will delay below, no field changes beyond cmd
+
+        elif strategy == "FLAG_00":
+            # Set byte[13] = 0x00 (maybe 0x01 = "from device", 0x00 = "from server")
+            ack[13] = 0x00
+
+        elif strategy == "HEADER_36B":
+            pass  # Will truncate below
+
+        elif strategy == "SEQ_SWAP_FLAG00":
+            ack[4], ack[5] = packet.recv_seq, packet.send_seq
+            ack[13] = 0x00
+
+        elif strategy == "FRESH_SEQ":
+            # Server uses its own fresh seq=1, acknowledges device's send_seq
+            ack[4] = 0x01
+            ack[5] = packet.send_seq
+
+        elif strategy == "CMD_8001":
+            # Some protocols use high-bit for response: 0x8001
+            struct.pack_into('<H', ack, 2, 0x8001)
+
+        # Recompute checksum after all field changes
+        _apply_checksum(ack)
+
+        # Truncate for header-only strategy
+        if strategy == "HEADER_36B":
+            ack = ack[:HEADER_SIZE]
+
+        ack = bytes(ack)
+
+        # Delay for DELAYED_2S strategy
+        if strategy == "DELAYED_2S":
+            logger.warning(f"[ZK-TCP] Strategy DELAYED_2S: waiting 2s before sending ACK")
+            await asyncio.sleep(2.0)
+
+        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack)}B) [{strategy}]: {ack.hex()}")
         await self._send(ack)
 
     async def _handle_heartbeat(self, packet):
