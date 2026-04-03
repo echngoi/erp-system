@@ -1,0 +1,1180 @@
+================================================================================
+  HƯỚNG DẪN TRIỂN KHAI: VERCEL (Frontend) + VPS (Backend) - SUBDOMAIN
+================================================================================
+
+  Kiến trúc:
+    ┌─────────────────┐         ┌──────────────────────────────┐
+    │  hrmgo.site      │         │  api.hrmgo.site              │
+    │  (Vercel)        │  ────►  │  (VPS 123.30.48.72)          │
+    │  React Frontend  │  CORS   │  Django API + WebSocket      │
+    └─────────────────┘         │  + Máy chấm công (/iclock)   │
+                                └──────────────────────────────┘
+
+  Domain chính:
+    - hrmgo.site, www.hrmgo.site  →  Vercel (React Frontend)
+    - api.hrmgo.site               →  VPS (Django Backend API)
+
+  Máy chấm công:
+    - Kết nối HTTP tới api.hrmgo.site:80/iclock/cdata
+
+================================================================================
+  BƯỚC 1: CẤU HÌNH DNS TẠI NHÀ CUNG CẤP DOMAIN
+================================================================================
+
+Vào trang quản lý DNS của domain hrmgo.site (nơi bạn mua domain).
+
+1.1. XÓA các bản ghi A cũ nếu có:
+     - Xóa bản ghi A của @ (root) trỏ về 123.30.48.72 (VPS)
+     - Xóa bản ghi A của www trỏ về 123.30.48.72
+
+1.2. THÊM bản ghi cho VERCEL (Frontend):
+     ┌──────────┬──────────┬─────────────────────────┐
+     │ Type     │ Host     │ Value                   │
+     ├──────────┼──────────┼─────────────────────────┤
+     │ A        │ @        │ 216.198.79.1            │
+     │ CNAME    │ www      │ cname.vercel-dns.com.   │
+     └──────────┴──────────┴─────────────────────────┘
+
+     Giải thích:
+     - Với project/domain của bạn, hãy ưu tiên đúng giá trị A record mà Vercel Dashboard đang hiển thị
+     - Hiện tại dashboard của bạn đang yêu cầu 216.198.79.1 thì dùng 216.198.79.1
+     - Không nên cố chấp dùng một IP "chung" lấy từ tài liệu cũ nếu dashboard đang khuyến nghị IP khác
+     - CNAME www → cname.vercel-dns.com cho www.hrmgo.site
+
+1.3. THÊM bản ghi cho VPS (Backend API):
+     ┌──────────┬──────────┬─────────────────────────┐
+     │ Type     │ Host     │ Value                   │
+     ├──────────┼──────────┼─────────────────────────┤
+     │ A        │ api      │ 123.30.48.72            │
+     └──────────┴──────────┴─────────────────────────┘
+
+     Kết quả:
+     - api.hrmgo.site → 123.30.48.72 (VPS)
+
+1.4. KIỂM TRA DNS đã propagate:
+     (Chạy trên máy tính cá nhân, KHÔNG phải VPS)
+
+     nslookup hrmgo.site
+     → Phải trả về: 216.198.79.1
+
+     nslookup api.hrmgo.site
+     → Phải trả về: 123.30.48.72
+
+     Nếu chưa đúng, đợi 5-30 phút rồi kiểm tra lại.
+     Có thể dùng web: https://dnschecker.org/#A/api.hrmgo.site
+
+
+================================================================================
+  BƯỚC 2: CẤU HÌNH DOMAIN TRÊN VERCEL
+================================================================================
+
+2.1. Truy cập Vercel Dashboard:
+     https://vercel.com/dashboard
+
+2.2. Chọn project "erp-system" (hoặc tên project của bạn)
+
+2.3. Vào Settings → Domains
+
+2.4. Thêm domain:
+     - BẮT BUỘC: Nhập hrmgo.site → Add
+     - TÙY CHỌN: Nhập www.hrmgo.site → Add
+
+     Giải thích:
+     - Chỉ cần hrmgo.site là đủ để website hoạt động
+     - Thêm www.hrmgo.site chỉ để người dùng gõ www.hrmgo.site vẫn vào được web
+     - Nếu thêm cả hai, nên chọn một domain chuẩn rồi redirect domain còn lại về domain chuẩn
+     - Nếu bạn không dùng www, có thể bỏ qua hoàn toàn bước thêm www.hrmgo.site
+
+2.5. Vercel sẽ hiển thị trạng thái:
+     - Nếu DNS đã propagate: ✅ Valid Configuration
+     - Nếu chưa: ⚠️ Pending Verification → đợi DNS propagate
+
+2.6. Vercel tự động cấp SSL cho hrmgo.site và www.hrmgo.site
+     (không cần làm gì thêm)
+
+2.7. Cấu hình redirect (tùy chọn nhưng khuyến nghị):
+     - www.hrmgo.site → redirect tới hrmgo.site
+     - Vercel thường tự động đề xuất option này khi thêm www
+
+
+================================================================================
+  BƯỚC 3: CẬP NHẬT FILE FRONTEND (TRÊN MÁY TÍNH CÁ NHÂN)
+================================================================================
+
+3.1. Sửa file: frontend/.env.production
+     ─────────────────────────────────────
+     NỘI DUNG MỚI (thay toàn bộ file):
+
+VITE_API_BASE_URL=https://api.hrmgo.site/api
+VITE_WS_URL=wss://api.hrmgo.site
+
+     ─────────────────────────────────────
+
+3.2. KIỂM TRA file frontend/src/services/api.js
+     Đảm bảo dòng này tồn tại (KHÔNG cần sửa):
+
+     const BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000/api';
+
+3.3. CẤU HÌNH Vercel Environment Variables:
+     - Vào Vercel Dashboard → Project → Settings → Environment Variables
+     - Thêm biến:
+       ┌────────────────────┬─────────────────────────────────┬────────────┐
+       │ Name               │ Value                           │ Environment│
+       ├────────────────────┼─────────────────────────────────┼────────────┤
+       │ VITE_API_BASE_URL  │ https://api.hrmgo.site/api      │ Production │
+       │ VITE_WS_URL        │ wss://api.hrmgo.site            │ Production │
+       └────────────────────┴─────────────────────────────────┴────────────┘
+
+     LƯU Ý: Vercel sẽ sử dụng Environment Variables này khi build.
+     Nếu đã có giá trị cũ → XÓA rồi thêm lại giá trị mới.
+
+3.4. PUSH CODE lên GitHub:
+     cd "d:\myproject\ERP (COPY)"
+     git add frontend/.env.production
+     git commit -m "Update frontend env for api subdomain"
+     git push origin master
+
+     → Vercel sẽ tự động build và deploy khi nhận push.
+
+
+================================================================================
+  BƯỚC 4: CẬP NHẬT NGINX TRÊN VPS (CHO api.hrmgo.site)
+================================================================================
+
+SSH vào VPS:
+     ssh root@123.30.48.72
+
+4.1. Sửa file nginx.conf:
+     cd /root/erp-system
+     nano deploy/nginx.conf
+
+     → Thay TOÀN BỘ nội dung file bằng nội dung dưới đây:
+           → CHỈ copy phần cấu hình nginx thực tế
+           → KHÔNG copy các dòng trang trí như:
+                ─── BẮT ĐẦU NỘI DUNG deploy/nginx.conf ───
+                ─── KẾT THÚC NỘI DUNG deploy/nginx.conf ───
+           → Nếu copy cả các dòng này, nginx sẽ lỗi:
+                unknown directive "───"
+
+─── BẮT ĐẦU NỘI DUNG deploy/nginx.conf ───
+
+# ───────────────────────────────────────────────────────────
+# Nginx config for ERP Production - API Subdomain
+# - api.hrmgo.site: Backend API + WebSocket + iclock
+# - Frontend served by Vercel (hrmgo.site)
+# ───────────────────────────────────────────────────────────
+
+# ── Rate limiting cho iclock (chống spam) ──
+limit_req_zone $binary_remote_addr zone=iclock:10m rate=30r/s;
+
+# ── Upstream ──
+upstream django {
+    server backend:8000;
+}
+
+# ══════════════════════════════════════════════════════════
+# HTTP (Port 80)
+# - Máy chấm công ADMS chỉ hỗ trợ HTTP
+# - ACME challenge cho Let's Encrypt
+# - Mọi request khác redirect → HTTPS
+# ══════════════════════════════════════════════════════════
+server {
+    listen 80;
+    server_name api.hrmgo.site;
+
+    # Let's Encrypt challenge
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+
+    # ── iclock: Máy chấm công push data (HTTP only) ──
+    location /iclock/ {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 60s;
+    }
+
+    location /cdata {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+
+    # ── Tất cả request khác → HTTPS ──
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+
+# ══════════════════════════════════════════════════════════
+# HTTPS (Port 443)
+# - API, WebSocket, Admin, Static, Media
+# ══════════════════════════════════════════════════════════
+server {
+    listen 443 ssl http2;
+    server_name api.hrmgo.site;
+
+    # SSL certificates (Let's Encrypt)
+    ssl_certificate /etc/letsencrypt/live/api.hrmgo.site/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/api.hrmgo.site/privkey.pem;
+
+    # SSL Security
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+    ssl_prefer_server_ciphers on;
+    ssl_session_cache shared:SSL:10m;
+    ssl_session_timeout 10m;
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+    add_header Strict-Transport-Security "max-age=63072000" always;
+
+    # Request size limit (cho file upload)
+    client_max_body_size 10M;
+
+    # ── API Django ──
+    location /api/ {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ── Django Admin ──
+    location /admin/ {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ── WebSocket ──
+    location /ws/ {
+        proxy_pass http://django;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-Proto https;
+        proxy_read_timeout 86400;
+    }
+
+    # ── iclock qua HTTPS (fallback nếu máy CC hỗ trợ) ──
+    location /iclock/ {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
+    # ── Static files (Django collectstatic) ──
+    location /static/ {
+        alias /var/www/static/;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # ── Media files ──
+    location /media/ {
+        alias /var/www/media/;
+        expires 7d;
+    }
+
+    # ── Health check ──
+    location /health {
+        return 200 'OK';
+        add_header Content-Type text/plain;
+    }
+
+    # ── Catch-all → 404 (không serve FE nữa) ──
+    location / {
+        return 404;
+    }
+}
+
+─── KẾT THÚC NỘI DUNG deploy/nginx.conf ───
+
+
+================================================================================
+  BƯỚC 5: LẤY CHỨNG CHỈ SSL CHO api.hrmgo.site
+================================================================================
+
+QUAN TRỌNG: Phải làm bước này SAU khi DNS đã propagate (bước 1.4 ✅)
+
+5.1. Trước tiên, tạm thời sửa nginx.conf để chỉ có HTTP (không SSL)
+     vì chưa có cert cho api.hrmgo.site:
+
+     cd /root/erp-system
+     nano deploy/nginx-temp.conf
+
+     Dán nội dung sau:
+
+─── BẮT ĐẦU nginx-temp.conf ───
+limit_req_zone $binary_remote_addr zone=iclock:10m rate=30r/s;
+upstream django {
+    server backend:8000;
+}
+server {
+    listen 80;
+    server_name api.hrmgo.site;
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location /iclock/ {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 60s;
+    }
+    location /cdata {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+    location /api/ {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+    location / {
+        return 301 https://$host$request_uri;
+    }
+}
+─── KẾT THÚC nginx-temp.conf ───
+
+5.2. Áp dụng nginx tạm thời:
+     cp deploy/nginx.conf deploy/nginx.conf.bak
+     cp deploy/nginx-temp.conf deploy/nginx.conf
+     docker compose restart nginx
+
+5.3. Kiểm tra nginx hoạt động:
+
+     TRƯỚC TIÊN kiểm tra nginx container có đang chạy không:
+     docker compose ps
+
+     ═══ KHẮC PHỤC: Nếu nginx ở trạng thái "Restarting" ═══
+
+     Đây là lỗi phổ biến nhất: nginx crash vì config tham chiếu
+     SSL cert chưa tồn tại. Làm theo thứ tự sau:
+
+     a) Xem log để xác nhận nguyên nhân:
+        docker compose logs nginx --tail 20
+
+        Nếu thấy lỗi kiểu:
+        "cannot load certificate ... api.hrmgo.site ... No such file"
+        → Đúng là do cert chưa có.
+
+                    Nếu thấy lỗi kiểu:
+                    "unknown directive \"───\" in /etc/nginx/conf.d/default.conf"
+                    → Bạn đã dán nhầm các dòng phân cách trong file hướng dẫn vào nginx.conf.
+                    → Cần ghi đè lại nginx.conf chỉ với nội dung cấu hình thật, không có dòng
+                         "─── BẮT ĐẦU ..." hoặc "─── KẾT THÚC ..."
+
+     b) Kiểm tra file nginx.conf hiện tại có đang dùng bản tạm không:
+        cat deploy/nginx.conf | grep ssl_certificate
+
+        Nếu thấy dòng ssl_certificate → BẠN ĐANG DÙNG NHẦM bản đầy đủ,
+        chưa đổi sang bản tạm. Cần ghi đè lại:
+
+     c) Tạo lại file nginx tạm (HTTP only, KHÔNG có SSL):
+
+        cat > deploy/nginx.conf << 'NGINX_TEMP'
+limit_req_zone $binary_remote_addr zone=iclock:10m rate=30r/s;
+upstream django {
+    server backend:8000;
+}
+server {
+    listen 80;
+    server_name api.hrmgo.site;
+    location /.well-known/acme-challenge/ {
+        root /var/www/certbot;
+    }
+    location /iclock/ {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+        proxy_connect_timeout 30s;
+        proxy_read_timeout 60s;
+    }
+    location /cdata {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+    location /api/ {
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+    location / {
+        return 200 'API server is running';
+        add_header Content-Type text/plain;
+    }
+}
+NGINX_TEMP
+
+     d) Restart nginx:
+        docker compose restart nginx
+
+     e) Đợi 5 giây rồi kiểm tra lại:
+        docker compose ps
+
+        → nginx phải ở trạng thái "Up" (KHÔNG phải "Restarting")
+
+     f) Nếu vẫn Restarting → xem log lần nữa:
+        docker compose logs nginx --tail 10
+        → Gửi output cho tôi để debug tiếp.
+
+      g) Trường hợp log báo "unknown directive \"───\"":
+          Sửa nhanh bằng cách ghi đè lại file bằng block dưới đây và chỉ copy
+          phần từ limit_req_zone đến dấu NGINX_TEMP cuối cùng:
+
+          cat > deploy/nginx.conf << 'NGINX_TEMP'
+limit_req_zone $binary_remote_addr zone=iclock:10m rate=30r/s;
+upstream django {
+     server backend:8000;
+}
+server {
+     listen 80;
+     server_name api.hrmgo.site;
+     location /.well-known/acme-challenge/ {
+          root /var/www/certbot;
+     }
+     location /iclock/ {
+          limit_req zone=iclock burst=50 nodelay;
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto http;
+          proxy_connect_timeout 30s;
+          proxy_read_timeout 60s;
+     }
+     location /cdata {
+          limit_req zone=iclock burst=50 nodelay;
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto http;
+     }
+     location /api/ {
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto http;
+     }
+     location / {
+          return 200 'API server is running';
+          add_header Content-Type text/plain;
+     }
+}
+NGINX_TEMP
+
+          docker compose restart nginx
+          docker compose ps
+
+     ═══ KẾT THÚC KHẮC PHỤC ═══
+
+     Sau khi nginx ở trạng thái "Up", test:
+     curl -I http://api.hrmgo.site/api/
+           → Phải thấy response từ Django (KHÔNG phải connection refused)
+           → Nếu nhận 400 Bad Request thì vẫn là OK ở bước này, vì điều đó chứng tỏ:
+                - DNS đã trỏ tới VPS
+                - Port 80 đã mở
+                - nginx đang chạy
+                - nginx đã proxy được request vào Django
+
+     curl http://api.hrmgo.site/api/auth/login/
+     → Phải thấy response JSON (405 hoặc 400 đều OK, nghĩa là Django đang nhận request)
+           → Nếu bạn gọi endpoint login bằng GET và nhận trang HTML "Bad Request (400)"
+                thì vẫn chấp nhận được ở bước này. Endpoint login thường cần POST + JSON body,
+                nên GET không phải cách test cuối cùng.
+
+     Nếu vẫn bị "connection refused" dù nginx đã Up:
+     - Kiểm tra DNS: nslookup api.hrmgo.site → phải là 123.30.48.72
+     - Kiểm tra firewall: ufw status → port 80, 443 phải ALLOW
+     - Thử curl localhost: curl -I http://127.0.0.1/api/
+       Nếu localhost trả response nhưng domain không → DNS chưa propagate
+
+5.4. Lấy SSL certificate:
+           QUAN TRỌNG:
+           Service certbot trong docker-compose.yml đang có entrypoint để chạy
+           "certbot renew" tự động. Vì vậy nếu dùng:
+           docker compose run --rm certbot certonly ...
+           thì rất dễ bị chạy nhầm renewal thay vì certonly.
+
+           Hãy dùng đúng lệnh này để bỏ qua entrypoint hiện tại:
+
+           docker compose run --rm --entrypoint certbot certbot certonly \
+       --webroot \
+       --webroot-path=/var/www/certbot \
+       -d api.hrmgo.site \
+       --email your-email@gmail.com \
+       --agree-tos \
+       --no-eff-email
+
+     → Thành công sẽ hiện: "Successfully received certificate"
+     → Certificate lưu tại: /etc/letsencrypt/live/api.hrmgo.site/
+           → Kiểm tra lại bằng:
+                docker compose exec nginx ls /etc/letsencrypt/live/api.hrmgo.site/
+                Nếu thấy fullchain.pem và privkey.pem thì cert đã tạo xong
+
+     LƯU Ý: Thay your-email@gmail.com bằng email thật của bạn.
+
+           Nếu bạn thấy output kiểu:
+           "Processing /etc/letsencrypt/renewal/hrmgo.site.conf"
+           "Certificate not yet due for renewal"
+           "No renewals were attempted"
+           → Nghĩa là bạn đang chạy nhầm entrypoint renew, cert cho api.hrmgo.site
+                CHƯA được tạo. Khi đó hãy chạy lại đúng lệnh có --entrypoint certbot ở trên.
+
+           Nếu thấy warning kiểu:
+           "volume ... already exists but was not created by Docker Compose"
+           → Có thể tạm bỏ qua ở bước này; đây không phải lỗi chặn việc cấp cert.
+
+5.5. Khôi phục nginx.conf đầy đủ (có HTTPS):
+     Lấy nội dung nginx.conf ĐẦY ĐỦ từ bước 4 ở trên và ghi vào:
+     nano deploy/nginx.conf
+     → Dán toàn bộ nội dung từ bước 4
+
+      Để tránh copy nhầm dòng trang trí, dùng luôn block an toàn dưới đây:
+
+      cat > deploy/nginx.conf << 'NGINX_FULL'
+limit_req_zone $binary_remote_addr zone=iclock:10m rate=30r/s;
+
+upstream django {
+     server backend:8000;
+}
+
+server {
+     listen 80;
+     server_name api.hrmgo.site;
+
+     location /.well-known/acme-challenge/ {
+          root /var/www/certbot;
+     }
+
+     location /iclock/ {
+          limit_req zone=iclock burst=50 nodelay;
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto http;
+          proxy_connect_timeout 30s;
+          proxy_read_timeout 60s;
+     }
+
+     location /cdata {
+          limit_req zone=iclock burst=50 nodelay;
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto http;
+     }
+
+     location / {
+          return 301 https://$host$request_uri;
+     }
+}
+
+server {
+     listen 443 ssl http2;
+     server_name api.hrmgo.site;
+
+     ssl_certificate /etc/letsencrypt/live/api.hrmgo.site/fullchain.pem;
+     ssl_certificate_key /etc/letsencrypt/live/api.hrmgo.site/privkey.pem;
+
+     ssl_protocols TLSv1.2 TLSv1.3;
+     ssl_ciphers HIGH:!aNULL:!MD5;
+     ssl_prefer_server_ciphers on;
+     ssl_session_cache shared:SSL:10m;
+     ssl_session_timeout 10m;
+
+     add_header X-Frame-Options "SAMEORIGIN" always;
+     add_header X-Content-Type-Options "nosniff" always;
+     add_header X-XSS-Protection "1; mode=block" always;
+     add_header Strict-Transport-Security "max-age=63072000" always;
+
+     client_max_body_size 10M;
+
+     location /api/ {
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+     }
+
+     location /admin/ {
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+     }
+
+     location /ws/ {
+          proxy_pass http://django;
+          proxy_http_version 1.1;
+          proxy_set_header Upgrade $http_upgrade;
+          proxy_set_header Connection "upgrade";
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-Proto https;
+          proxy_read_timeout 86400;
+     }
+
+     location /iclock/ {
+          proxy_pass http://django;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+          proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+          proxy_set_header X-Forwarded-Proto https;
+     }
+
+     location /static/ {
+          alias /var/www/static/;
+          expires 30d;
+          add_header Cache-Control "public, immutable";
+     }
+
+     location /media/ {
+          alias /var/www/media/;
+          expires 7d;
+     }
+
+     location /health {
+          return 200 'OK';
+          add_header Content-Type text/plain;
+     }
+
+     location / {
+          return 404;
+     }
+}
+NGINX_FULL
+
+      Sau khi dán xong, chạy ngay:
+      docker compose restart nginx
+      docker compose ps
+      docker compose logs nginx --tail 20
+      curl -I https://api.hrmgo.site/api/
+
+       QUAN TRỌNG:
+       Nếu bạn vẫn giữ file nginx.conf tạm ở bước 5.3 thì nginx chỉ listen cổng 80.
+       Khi đó:
+       - curl http://api.hrmgo.site/... sẽ OK
+       - curl https://api.hrmgo.site/... sẽ báo: Couldn't connect to server
+       Đây không phải lỗi cert, mà là do nginx chưa được chuyển sang bản cấu hình HTTPS đầy đủ.
+
+5.6. Restart nginx với config mới:
+     docker compose restart nginx
+
+       Kiểm tra ngay sau restart:
+       docker compose ps
+       docker compose logs nginx --tail 20
+
+       Nếu nginx bị Restarting sau khi đổi sang bản HTTPS:
+       - Kiểm tra lại deploy/nginx.conf có đúng block 443 không
+       - Kiểm tra lại cert tồn tại:
+           docker compose exec nginx ls /etc/letsencrypt/live/api.hrmgo.site/
+       - Kiểm tra có copy nhầm dòng trang trí hay không
+
+5.7. Kiểm tra HTTPS hoạt động:
+     curl -I https://api.hrmgo.site/api/
+       → Phải thấy response từ Django (status 200, 400 hoặc 401 đều chấp nhận được)
+
+       Nếu báo:
+       curl: (7) Failed to connect to api.hrmgo.site port 443
+       → Gần như chắc chắn bạn đang dùng nhầm nginx.conf tạm chỉ có HTTP.
+       Xử lý theo thứ tự:
+       1. Mở lại deploy/nginx.conf
+       2. Dán bản cấu hình ĐẦY ĐỦ ở bước 4, có cả block:
+            server {
+                    listen 443 ssl http2;
+                    server_name api.hrmgo.site;
+                    ...
+            }
+       3. Restart lại:
+            docker compose restart nginx
+       4. Kiểm tra lại:
+            docker compose ps
+            docker compose logs nginx --tail 20
+       5. Test lại:
+            curl -I https://api.hrmgo.site/api/
+
+     Nếu lỗi SSL:
+     - Kiểm tra cert tồn tại:
+       docker compose exec nginx ls /etc/letsencrypt/live/api.hrmgo.site/
+     - Kiểm tra nginx logs:
+       docker compose logs nginx --tail 20
+
+
+================================================================================
+  BƯỚC 6: CẬP NHẬT BACKEND .env.production TRÊN VPS
+================================================================================
+
+6.1. Sửa file .env trên VPS:
+     cd /root/erp-system
+     nano backend/.env.production
+
+       HƯỚNG DẪN SỬA BẰNG NANO:
+       1. Mở file:
+            nano backend/.env.production
+       2. Trong nano, tìm dòng bắt đầu bằng:
+            ALLOWED_HOSTS=
+       3. Sửa dòng đó thành đúng giá trị này:
+            ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+       4. Nếu file chưa có dòng `ALLOWED_HOSTS=` thì thêm mới một dòng như trên
+       5. Kiểm tra luôn dòng CORS, nên để:
+            CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+       6. Lưu file:
+            Ctrl+O
+            Enter
+       7. Thoát nano:
+            Ctrl+X
+       8. Kiểm tra lại file sau khi lưu:
+            grep "^ALLOWED_HOSTS=" backend/.env.production
+            grep "^CORS_ALLOWED_ORIGINS=" backend/.env.production
+       9. Kết quả mong đợi:
+            ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+            CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+       10. Nạp lại cấu hình:
+               docker compose up -d --build backend
+               docker compose restart nginx
+               docker compose logs backend --tail 30
+
+6.2. TÌM và SỬA các dòng sau:
+
+     TRƯỚC (cũ):
+     ───────────
+     ALLOWED_HOSTS=hrmgo.site,www.hrmgo.site
+     CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site,https://erp-system-nine-zeta.vercel.app
+
+     SAU (mới):
+     ──────────
+     ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+     CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+
+     Giải thích:
+     - ALLOWED_HOSTS: thêm api.hrmgo.site (domain mới của backend)
+     - CORS_ALLOWED_ORIGINS: chỉ cần domain của frontend (hrmgo.site)
+       KHÔNG cần URL vercel cũ (erp-system-nine-zeta.vercel.app) vì
+       giờ đã dùng custom domain
+
+     Tùy chọn: nếu muốn truy cập qua URL Vercel gốc cũng được thì giữ:
+     CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site,https://erp-system-nine-zeta.vercel.app
+
+     CÁCH SỬA NHANH KHÔNG CẦN MỞ NANO:
+     Nếu bạn muốn thay trực tiếp bằng lệnh, chạy:
+
+     sed -i 's|^ALLOWED_HOSTS=.*|ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site|' backend/.env.production
+
+     Sau đó kiểm tra lại:
+     grep "^ALLOWED_HOSTS=" backend/.env.production
+
+6.3. KIỂM TRA toàn bộ file .env.production phải có đủ các dòng thế này:
+     (các giá trị SECRET_KEY, DB_PASSWORD là của bạn, giữ nguyên)
+
+     SECRET_KEY=<giá-trị-của-bạn>
+     DEBUG=False
+     DJANGO_SETTINGS_MODULE=config.settings_prod
+     ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+     CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+     DB_NAME=erp
+     DB_USER=erp
+     DB_PASSWORD=<mật-khẩu-của-bạn>
+     DB_HOST=db
+     DB_PORT=5432
+
+6.4. Rebuild và restart backend:
+     docker compose up -d --build backend
+     docker compose restart nginx
+
+6.5. Kiểm tra backend healthy:
+     docker compose ps
+     → Tất cả services phải ở trạng thái "Up" / "healthy"
+
+6.6. Test API trực tiếp từ VPS:
+     curl -X POST https://api.hrmgo.site/api/auth/login/ \
+       -H "Content-Type: application/json" \
+       -d '{"username":"admin","password":"admin123"}'
+
+     → Phải trả về JSON chứa access token và refresh token
+     → Ví dụ: {"access":"eyJ...","refresh":"eyJ..."}
+
+           CÁCH TEST ĐÚNG:
+           1. Chạy đúng lệnh trên ngay trong VPS shell
+           2. Không thêm dấu nháy lạ, không xuống dòng sai vị trí
+           3. Nếu thành công, output sẽ là JSON một dòng, ví dụ:
+                    {"refresh":"eyJ...","access":"eyJ...","user":{...}}
+                    hoặc
+                    {"access":"eyJ...","refresh":"eyJ..."}
+           4. Chỉ cần thấy token `access` hoặc `refresh` là login API đã hoạt động
+
+           CÁCH ĐỌC KẾT QUẢ:
+           - Trả về access/refresh token:
+                → Thành công hoàn toàn
+                → Backend + nginx + SSL + endpoint login đều OK
+           - 400 Bad Request:
+                → Thường là sai format JSON hoặc sai field request
+                → Kiểm tra lại đúng body:
+                     {"username":"admin","password":"admin123"}
+           - 401 Unauthorized hoặc thông báo sai tài khoản:
+                → API chạy bình thường nhưng username/password sai
+           - 500 Internal Server Error:
+                → Backend có lỗi, xem log backend
+           - curl: (7) Couldn't connect to server:
+                → nginx/HTTPS chưa chạy đúng, quay lại bước 5.5-5.7
+
+           Nếu muốn xem rõ cả status code lẫn body, dùng thêm lệnh này:
+           curl -i -X POST https://api.hrmgo.site/api/auth/login/ \
+                -H "Content-Type: application/json" \
+                -d '{"username":"admin","password":"admin123"}'
+
+           Nếu muốn debug khi lỗi 500 hoặc 400 không rõ nguyên nhân:
+           docker compose logs backend --tail 50
+
+     Nếu lỗi:
+           - 400 Bad Request trả về HTML trang Django:
+                → Khả năng cao nhất là `api.hrmgo.site` chưa có trong ALLOWED_HOSTS
+                → Hoặc bạn đã sửa `.env.production` nhưng chưa rebuild backend
+                → Kiểm tra và sửa trên VPS:
+                     ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+                → Sau đó chạy:
+                     docker compose up -d --build backend
+                     docker compose restart nginx
+                     docker compose logs backend --tail 30
+                → Nếu log có dòng kiểu:
+                     Invalid HTTP_HOST header: 'api.hrmgo.site'
+                     thì đúng là lỗi ALLOWED_HOSTS
+           - 400 Bad Request dạng JSON từ API:
+                → Thường là sai format request hoặc thiếu field
+           - 401 Unauthorized: sai username/password
+     - 500: xem logs: docker compose logs backend --tail 30
+     - Connection refused: docker compose ps, kiểm tra nginx chạy chưa
+
+
+================================================================================
+  BƯỚC 7: KIỂM TRA CORS TỪ MÁY TÍNH CÁ NHÂN
+================================================================================
+
+7.1. Test CORS bằng curl từ máy tính cá nhân (CMD hoặc PowerShell):
+
+     curl -I -X OPTIONS https://api.hrmgo.site/api/auth/login/ ^
+       -H "Origin: https://hrmgo.site" ^
+       -H "Access-Control-Request-Method: POST" ^
+       -H "Access-Control-Request-Headers: Content-Type,Authorization"
+
+     (Trên Linux/Mac dùng \ thay ^)
+
+     → Response phải chứa:
+       Access-Control-Allow-Origin: https://hrmgo.site
+       Access-Control-Allow-Credentials: true
+       Access-Control-Allow-Methods: ... POST ...
+       Access-Control-Allow-Headers: ... content-type ... authorization ...
+
+     Nếu KHÔNG thấy các header trên:
+     - Kiểm tra CORS_ALLOWED_ORIGINS trong .env.production
+     - Đảm bảo django-cors-headers đã cài trong requirements.txt
+     - Đảm bảo corsheaders middleware trong INSTALLED_APPS và MIDDLEWARE
+     - Rebuild: docker compose up -d --build backend
+
+7.2. Test login từ máy tính cá nhân:
+     curl -X POST https://api.hrmgo.site/api/auth/login/ ^
+       -H "Content-Type: application/json" ^
+       -H "Origin: https://hrmgo.site" ^
+       -d "{\"username\":\"admin\",\"password\":\"admin123\"}"
+
+     → Phải trả về JSON token
+
+
+================================================================================
+  BƯỚC 8: DEPLOY FRONTEND LÊN VERCEL
+================================================================================
+
+8.1. Đảm bảo code đã push lên GitHub (bước 3.4)
+
+8.2. Kiểm tra trên Vercel Dashboard:
+     - Vào project → Deployments
+     - Build mới nhất phải thành công (✅ Ready)
+     - Nếu build lỗi → xem Build Logs
+
+8.3. Kiểm tra Vercel Environment Variables:
+     - Settings → Environment Variables
+     - Phải có:
+       VITE_API_BASE_URL = https://api.hrmgo.site/api
+       VITE_WS_URL = wss://api.hrmgo.site
+
+     Nếu vừa thêm/sửa biến môi trường → cần REDEPLOY:
+     - Vào Deployments → chọn deployment mới nhất
+     - Click "..." → Redeploy → Confirm
+     (Hoặc push 1 commit rỗng: git commit --allow-empty -m "trigger redeploy" && git push)
+
+8.4. Kiểm tra domain:
+     - Mở trình duyệt: https://hrmgo.site
+     - Phải thấy trang login của ERP
+     - Kiểm tra cả: https://www.hrmgo.site (phải redirect về hrmgo.site)
+
+
+================================================================================
+  BƯỚC 9: TEST TOÀN BỘ HỆ THỐNG
+================================================================================
+
+9.1. Test Login:
+     - Mở https://hrmgo.site
+     - Đăng nhập: admin / admin123
+     - Phải vào được dashboard
+
+     Nếu lỗi khi login:
+     a) Mở DevTools (F12) → Network tab
+     b) Bấm Login
+     c) Tìm request tới api.hrmgo.site/api/auth/login/
+     d) Kiểm tra:
+        - Status: 200 → OK
+        - Status: 0 hoặc CORS error → CORS chưa đúng (xem bước 6-7)
+        - Status: 404 → URL sai, kiểm tra .env.production
+        - Status: 500 → Backend lỗi, xem logs trên VPS
+
+9.2. Test API requests:
+     - Sau khi login, navigate qua các trang: Nhân viên, Phòng ban, Chấm công
+     - Mở DevTools → Network, kiểm tra tất cả request đều tới api.hrmgo.site
+     - Không được có request nào tới hrmgo.site/api (đó là Vercel, sẽ 404)
+
+9.3. Test WebSocket:
+     - Mở DevTools → Network → WS tab
+     - Phải thấy kết nối tới wss://api.hrmgo.site/ws/...
+     - Status: 101 Switching Protocols → OK
+
+9.4. Test máy chấm công (nếu đã cấu hình):
+     - Trên VPS: docker compose logs backend --tail 50 -f
+     - Cho máy chấm công chấm 1 lần
+     - Phải thấy log: "ADMS push received" hoặc tương tự
+
+
+================================================================================
+  BƯỚC 10: CẤU HÌNH MÁY CHẤM CÔNG RONALD JACK AI06F
+================================================================================
+
+Trên máy chấm công, cấu hình ADMS:
+
+     Domain:   api.hrmgo.site
+     Port:     80
+     Enable:   ON / Enable push
+
+     LƯU Ý: Máy chấm công ADMS chỉ hỗ trợ HTTP (port 80), KHÔNG hỗ trợ HTTPS.
+     Nginx đã được cấu hình để phục vụ /iclock/ qua HTTP port 80.
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ THƯỜNG GẶP
+================================================================================
+
+─── SỰ CỐ 1: Trang trắng hoặc 404 trên hrmgo.site ───
+
+Nguyên nhân: Vercel chưa nhận domain hoặc build lỗi
+Xử lý:
+  1. Vercel Dashboard → Project → Settings → Domains
+     → hrmgo.site phải hiện ✅ Valid
+  2. Deployments → build mới nhất phải ✅ Ready
+     3. Kiểm tra DNS: nslookup hrmgo.site → phải là đúng IP A record mà Vercel Dashboard đang yêu cầu, hiện tại là 216.198.79.1
+
+─── SỰ CỐ 2: Login lỗi - Network Error / CORS ───
+
+Nguyên nhân: CORS chưa cấu hình đúng
+Xử lý:
+  1. Trên VPS kiểm tra .env.production:
+     CORS_ALLOWED_ORIGINS phải chứa https://hrmgo.site
+  2. Rebuild: docker compose up -d --build backend
+  3. Test CORS: dùng curl ở bước 7.1
+
+─── SỰ CỐ 2B: POST /api/auth/login/ trả trang HTML Bad Request (400) ───
+
+Nguyên nhân thường gặp nhất:
+  - `api.hrmgo.site` chưa có trong `ALLOWED_HOSTS`
+  - Đã sửa `.env.production` nhưng backend chưa rebuild
+
+Xử lý:
+  1. Mở file trên VPS:
+       nano backend/.env.production
+  2. Đảm bảo có dòng:
+       ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site
+  3. Khuyến nghị đồng thời đặt:
+       CORS_ALLOWED_ORIGINS=https://hrmgo.site,https://www.hrmgo.site
+  4. Rebuild backend:
+       docker compose up -d --build backend
+  5. Restart nginx:
+       docker compose restart nginx
+  6. Xem log xác nhận:
+       docker compose logs backend --tail 30
+  7. Test lại:
+       curl -i -X POST https://api.hrmgo.site/api/auth/login/ \
+           -H "Content-Type: application/json" \
+           -d '{"username":"admin","password":"admin123"}'
+
+Nếu log backend có dòng kiểu:
+  Invalid HTTP_HOST header: 'api.hrmgo.site'
+thì nguyên nhân đã được xác nhận chính xác là ALLOWED_HOSTS.
+
+─── SỰ CỐ 3: Login lỗi - 502 Bad Gateway ───
+
+Nguyên nhân: Backend container không chạy
+Xử lý:
+  1. docker compose ps → kiểm tra backend status
+  2. docker compose logs backend --tail 30
+  3. docker compose up -d --build backend
+
+─── SỰ CỐ 4: SSL error trên api.hrmgo.site ───
+
+Nguyên nhân: Cert chưa có hoặc hết hạn
+Xử lý:
+  1. docker compose exec nginx ls /etc/letsencrypt/live/
+     → Phải có thư mục api.hrmgo.site/
+  2. Nếu không có → lấy lại cert (bước 5)
+  3. Nếu hết hạn:
+     docker compose run --rm certbot renew
+     docker compose restart nginx
+
+─── SỰ CỐ 4D: HTTPS port 443 không kết nối được ───
+
+Nguyên nhân thường gặp nhất: vẫn đang dùng nginx.conf tạm chỉ có HTTP ở bước 5.3
+Xử lý:
+  1. Mở lại deploy/nginx.conf
+  2. Đảm bảo file có block `listen 443 ssl http2;`
+  3. Đảm bảo file trỏ tới cert:
+       ssl_certificate /etc/letsencrypt/live/api.hrmgo.site/fullchain.pem;
+       ssl_certificate_key /etc/letsencrypt/live/api.hrmgo.site/privkey.pem;
+  4. Restart lại nginx:
+       docker compose restart nginx
+  5. Kiểm tra:
+       docker compose ps
+       docker compose logs nginx --tail 20
+  6. Test lại:
+       curl -I https://api.hrmgo.site/api/
+
+─── SỰ CỐ 4C: chạy certbot nhưng chỉ thấy renew hrmgo.site ───
+
+Nguyên nhân: Service certbot đang dùng entrypoint riêng để chạy `certbot renew`
+Xử lý:
+  1. Không dùng lệnh:
+       docker compose run --rm certbot certonly ...
+  2. Dùng lệnh đúng:
+       docker compose run --rm --entrypoint certbot certbot certonly \
+           --webroot \
+           --webroot-path=/var/www/certbot \
+           -d api.hrmgo.site \
+           --email your-email@gmail.com \
+           --agree-tos \
+           --no-eff-email
+  3. Sau khi thành công, kiểm tra:
+       docker compose exec nginx ls /etc/letsencrypt/live/api.hrmgo.site/
+
+─── SỰ CỐ 4B: nginx báo unknown directive "───" ───
+
+Nguyên nhân: Đã copy nhầm các dòng trang trí trong file hướng dẫn vào nginx.conf
+Xử lý:
+  1. Mở lại deploy/nginx.conf
+  2. Xóa các dòng kiểu:
+       ─── BẮT ĐẦU NỘI DUNG deploy/nginx.conf ───
+       ─── KẾT THÚC NỘI DUNG deploy/nginx.conf ───
+  3. Chỉ giữ nội dung cấu hình nginx thật
+  4. Restart lại:
+       docker compose restart nginx
+  5. Kiểm tra lại:
+       docker compose ps
+       docker compose logs nginx --tail 20
+
+─── SỰ CỐ 5: Máy chấm công không push được ───
+
+Nguyên nhân: Port 80 bị chặn hoặc DNS chưa resolve
+Xử lý:
+  1. Từ mạng máy CC, ping api.hrmgo.site → phải resolve 123.30.48.72
+  2. curl http://api.hrmgo.site/iclock/cdata → phải có response
+  3. Kiểm tra firewall VPS: ufw status → port 80 phải ALLOW
+  4. docker compose logs backend -f → theo dõi khi máy CC push
+
+─── SỰ CỐ 6: WebSocket không kết nối ───
+
+Nguyên nhân: wss:// bị chặn hoặc cấu hình sai
+Xử lý:
+  1. Kiểm tra VITE_WS_URL trong Vercel env: wss://api.hrmgo.site
+  2. Test: wscat -c wss://api.hrmgo.site/ws/notifications/
+  3. docker compose logs nginx --tail 20 → xem có request /ws/ không
+
+
+================================================================================
+  TÓM TẮT CÁC FILE CẦN SỬA
+================================================================================
+
+  ┌─────────────────────────────────┬─────────────────────────────────────────┐
+  │ File                            │ Vị trí sửa                              │
+  ├─────────────────────────────────┼─────────────────────────────────────────┤
+  │ frontend/.env.production        │ Máy tính → push GitHub → Vercel auto   │
+  │ deploy/nginx.conf               │ Máy tính → push GitHub → pull trên VPS │
+  │ backend/.env.production         │ CHỈ trên VPS (nano trực tiếp)          │
+  │ DNS Records                     │ Trang quản lý domain                    │
+  │ Vercel Domain Settings          │ Vercel Dashboard                        │
+  │ Vercel Environment Variables    │ Vercel Dashboard                        │
+  └─────────────────────────────────┴─────────────────────────────────────────┘
+
+
+================================================================================
+  THỨ TỰ THỰC HIỆN (CHECKLIST)
+================================================================================
+
+  □ 1. Cấu hình DNS (thêm A record api → VPS, @ → Vercel)
+  □ 2. Đợi DNS propagate (5-30 phút), kiểm tra bằng nslookup
+     □ 3. Thêm domain hrmgo.site vào Vercel
+     □ 4. Nếu muốn hỗ trợ www thì thêm www.hrmgo.site và cấu hình redirect
+     □ 5. Sửa frontend/.env.production trên máy tính
+     □ 6. Thêm Vercel Environment Variables
+     □ 7. Push code lên GitHub (Vercel tự deploy)
+     □ 8. SSH vào VPS: tạo nginx-temp.conf, lấy SSL cert cho api.hrmgo.site
+     □ 9. SSH vào VPS: cập nhật deploy/nginx.conf (nội dung bước 4)
+     □ 10. SSH vào VPS: sửa backend/.env.production
+     □ 11. Rebuild backend + restart nginx
+     □ 12. Test CORS từ máy tính (curl)
+     □ 13. Test login trên https://hrmgo.site
+     □ 14. Cấu hình máy chấm công → api.hrmgo.site:80
+
+================================================================================
+  HOÀN TẤT! Hệ thống sẽ hoạt động với:
+  - https://hrmgo.site → Vercel (React Frontend)
+  - https://api.hrmgo.site → VPS (Django API + WebSocket)
+  - http://api.hrmgo.site:80/iclock/ → Máy chấm công
+================================================================================

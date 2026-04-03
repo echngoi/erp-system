@@ -1,0 +1,183 @@
+================================================================================
+  HƯỚNG DẪN: PUSH CODE LÊN GITHUB VÀ PULL TRÊN VPS
+  Repo: https://github.com/echngoi/erp-system.git
+  Branch: master
+================================================================================
+
+
+================================================================================
+  PHẦN 1: PUSH CODE TỪ MÁY TÍNH CÁ NHÂN LÊN GITHUB
+================================================================================
+
+Chạy các lệnh sau trên MÁY TÍNH CÁ NHÂN (PowerShell hoặc CMD):
+
+  cd "d:\myproject\ERP (COPY)"
+
+────────────────────────────────────────────────
+  PUSH TOÀN BỘ THAY ĐỔI (dùng hàng ngày)
+────────────────────────────────────────────────
+
+  B1. Kiểm tra file nào đã thay đổi:
+      git status
+
+  B2. Thêm tất cả file thay đổi vào staging:
+      git add -A
+
+      Hoặc chỉ thêm file cụ thể:
+      git add backend/attendance/zk_service.py
+      git add frontend/src/pages/Attendance/DeviceSettings.jsx
+
+  B3. Tạo commit với mô tả:
+      git commit -m "Fix healthcheck polluting device registry, fix hardcoded port"
+
+      (Thay nội dung trong dấu nháy bằng mô tả phù hợp)
+
+  B4. Push lên GitHub:
+      git push origin master
+
+  → Vercel sẽ tự động build và deploy frontend sau khi push.
+  → VPS cần pull thủ công (xem Phần 2).
+
+────────────────────────────────────────────────
+  PUSH LẦN ĐẦU (nếu chưa cấu hình git)
+────────────────────────────────────────────────
+
+  git config --global user.name "Tên của bạn"
+  git config --global user.email "email@gmail.com"
+  git remote set-url origin https://github.com/echngoi/erp-system.git
+
+  Sau đó push bình thường như trên.
+
+────────────────────────────────────────────────
+  PUSH CÁC FILE MỚI CHƯA TRACK
+────────────────────────────────────────────────
+
+  File mới tạo (new untracked) sẽ thấy ký hiệu "??" khi chạy git status.
+  Thêm vào và push:
+
+  git add deploy/attendance-machine-setup-guide.txt
+  git add deploy/vercel-vps-subdomain-guide.txt
+  git add -A
+  git commit -m "Add deployment guides"
+  git push origin master
+
+
+================================================================================
+  PHẦN 2: PULL CODE TRÊN VPS (SAU KHI ĐÃ PUSH LÊN GITHUB)
+================================================================================
+
+SSH vào VPS rồi chạy:
+
+  ssh root@123.30.48.72
+  cd /root/erp-system
+
+────────────────────────────────────────────────
+  PULL VÀ REBUILD BACKEND
+────────────────────────────────────────────────
+
+  Dùng khi thay đổi code backend (Python/Django):
+
+  git pull origin master
+  docker compose up -d --build backend
+
+  Kiểm tra sau rebuild:
+  docker compose ps
+  docker compose logs backend --tail 30
+
+────────────────────────────────────────────────
+  PULL VÀ REBUILD TOÀN BỘ
+────────────────────────────────────────────────
+
+  Dùng khi thay đổi nhiều thứ (nginx, Dockerfile, backend, ...):
+
+  git pull origin master
+  docker compose up -d --build
+  docker compose ps
+
+────────────────────────────────────────────────
+  CHỈ PULL KHÔNG REBUILD (khi đổi file config/txt)
+────────────────────────────────────────────────
+
+  Dùng khi chỉ thay đổi nginx.conf, .txt, hướng dẫn:
+
+  git pull origin master
+  docker compose restart nginx
+
+────────────────────────────────────────────────
+  PULL BỊ CONFLICT (VPS CÓ THAY ĐỔI LOCAL)
+────────────────────────────────────────────────
+
+  Nếu git pull báo conflict, dùng:
+
+  git fetch origin
+  git reset --hard origin/master
+
+  CẢNH BÁO: Lệnh này XÓA toàn bộ thay đổi local trên VPS.
+  Chỉ dùng khi chắc chắn không có dữ liệu quan trọng trên VPS cần giữ.
+  File backend/.env.production KHÔNG bị ảnh hưởng (không được commit vào git).
+
+
+================================================================================
+  PHẦN 3: QUY TRÌNH ĐẦY ĐỦ - FIX BUG VÀ DEPLOY LÊN VPS
+================================================================================
+
+  (Thực hiện đúng thứ tự này mỗi khi sửa code)
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  BƯỚC 1 — Trên máy tính cá nhân (PowerShell)                           │
+  │                                                                         │
+  │  cd "d:\myproject\ERP (COPY)"                                           │
+  │  git add -A                                                             │
+  │  git commit -m "Mô tả thay đổi"                                        │
+  │  git push origin master                                                 │
+  │                                                                         │
+  │  BƯỚC 2 — Trên VPS (SSH)                                               │
+  │                                                                         │
+  │  cd /root/erp-system                                                    │
+  │  git pull origin master                                                 │
+  │  docker compose up -d --build backend                                   │
+  │                                                                         │
+  │  BƯỚC 3 — Kiểm tra                                                     │
+  │                                                                         │
+  │  docker compose ps                                                      │
+  │  docker compose logs backend --tail 30                                  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  PHẦN 4: PUSH CODE CHO LẦN FIX HIỆN TẠI
+================================================================================
+
+  Các file đã thay đổi cần push ngay:
+
+  ┌──────────────────────────────────────────────────────┬───────────────────┐
+  │ File                                                 │ Lý do             │
+  ├──────────────────────────────────────────────────────┼───────────────────┤
+  │ backend/attendance/zk_service.py                     │ Fix healthcheck   │
+  │ frontend/src/pages/Attendance/DeviceSettings.jsx     │ Fix port 8000→80  │
+  │ backend/config/settings.py                           │ Đã sửa trước đó  │
+  │ deploy/nginx.conf                                    │ Đã sửa trước đó  │
+  └──────────────────────────────────────────────────────┴───────────────────┘
+
+  Chạy trên máy tính cá nhân:
+  cd "d:\myproject\ERP (COPY)"
+  git add -A
+  git commit -m "Fix healthcheck device registry, fix port display, update guides"
+  git push origin master
+
+  Chạy trên VPS:
+  cd /root/erp-system
+  git pull origin master
+  docker compose up -d --build backend
+
+  Kiểm tra sau khi rebuild:
+  docker compose ps
+  docker compose logs backend --tail 20
+
+  Test endpoint iclock:
+  curl -v "http://api.hrmgo.site/iclock/cdata?SN=TEST123"
+
+  → Phải thấy response text/plain (Stamp=0, Realtime=1, ...)
+  → KHÔNG còn thấy SN=healthcheck trong log khi check device status
+
+================================================================================

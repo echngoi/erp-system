@@ -1,0 +1,602 @@
+================================================================================
+  HƯỚNG DẪN CÀI ĐẶT VÀ KẾT NỐI MÁY CHẤM CÔNG VỚI VPS
+  Máy chấm công: Ronald Jack AI06F (ADMS Protocol)
+  Server: api.hrmgo.site (VPS 123.30.48.72)
+================================================================================
+
+  Kiến trúc kết nối:
+    ┌──────────────────┐    HTTP port 80     ┌──────────────────────────────┐
+    │ Máy chấm công    │  ───────────────►   │  VPS (api.hrmgo.site)        │
+    │ Ronald Jack AI06F│   POST /iclock/     │  Nginx → Django Backend      │
+    │ ADMS Protocol    │   cdata?table=      │                              │
+    │ (chỉ HTTP)       │                     │  WebSocket → Frontend        │
+    └──────────────────┘                     └──────────────────────────────┘
+
+  Luồng dữ liệu:
+    1. Nhân viên chấm công (vân tay/thẻ/mật khẩu)
+    2. Máy CC gửi HTTP POST tới api.hrmgo.site:80/iclock/cdata
+    3. Nginx proxy request vào Django backend
+    4. Django lưu vào database (bảng AttendanceLog)
+    5. Django gửi WebSocket realtime tới frontend
+    6. Frontend hiển thị chấm công trên LiveMonitor
+
+  QUAN TRỌNG:
+    - Máy Ronald Jack AI06F (ADMS) CHỈ hỗ trợ HTTP, KHÔNG hỗ trợ HTTPS
+    - Nginx đã được cấu hình sẵn phục vụ /iclock/ qua HTTP port 80
+    - Máy CC push dữ liệu lên server (server KHÔNG pull từ máy)
+
+
+================================================================================
+  BƯỚC 1: KIỂM TRA BACKEND ĐÃ SẴN SÀNG NHẬN DỮ LIỆU
+================================================================================
+
+SSH vào VPS:
+     ssh root@123.30.48.72
+     cd /root/erp-system
+
+1.1. Kiểm tra backend đang chạy:
+     docker compose ps
+
+     → Tất cả services (backend, nginx, db, redis) phải ở trạng thái "Up"
+
+1.2. Kiểm tra endpoint iclock hoạt động qua HTTP:
+     curl -v "http://api.hrmgo.site/iclock/cdata?SN=TEST123"
+
+     → Response ĐÚNG phải trả về dạng text/plain, nội dung kiểu:
+          GET OPTION FROM: TEST123
+          Stamp=0
+          OpStamp=0
+          PhotoStamp=0
+          ErrorDelay=30
+          Delay=10
+          TransTimes=00:00;14:05
+          TransInterval=1
+          TransFlag=TransData AttLog	OpLog	AttPhoto	EnrollUser	EnrollFP
+          Realtime=1
+          TimeZone=7
+          ServerVer=2.4.1
+
+     Giải thích các tham số server trả về:
+     - Stamp=0: Máy gửi tất cả records (không lọc theo thời gian)
+     - Realtime=1: Máy gửi ngay khi có chấm công mới (không batch)
+     - ErrorDelay=30: Nếu lỗi, máy thử lại sau 30 giây
+     - Delay=10: Máy polling lệnh mới mỗi 10 giây
+     - TimeZone=7: Múi giờ GMT+7 (Việt Nam)
+
+     → Nếu trả về HTML hoặc lỗi 400:
+          - Kiểm tra ALLOWED_HOSTS trong backend/.env.production
+            phải chứa api.hrmgo.site
+          - Rebuild: docker compose up -d --build backend
+
+     → Nếu connection refused:
+          - Kiểm tra nginx đang chạy: docker compose ps
+          - Kiểm tra port 80 mở: ufw status
+
+1.3. Kiểm tra endpoint getrequest:
+     curl -v "http://api.hrmgo.site/iclock/getrequest?SN=TEST123"
+
+     → Response phải là: OK
+     (Nghĩa là server không có lệnh nào cần gửi cho máy)
+
+1.4. Kiểm tra log backend:
+     docker compose logs backend --tail 20
+
+     → Phải thấy dòng log kiểu:
+          [iclock] Handshake từ SN=TEST123
+     (Chứng tỏ request đã đi qua nginx vào tới Django)
+
+
+================================================================================
+  BƯỚC 2: KIỂM TRA CẤU HÌNH .env.production TRÊN VPS
+================================================================================
+
+2.1. Kiểm tra biến môi trường liên quan máy chấm công:
+     grep "ZK_" backend/.env.production
+
+     Nếu chưa có, thêm vào file:
+     nano backend/.env.production
+
+     Thêm các dòng sau (cuối file):
+     ──────────────────────────────
+     ZK_DEVICE_IP=192.168.1.225
+     ZK_DEVICE_PORT=5005
+     ZK_DEVICE_TIMEOUT=10
+     ZK_DEVICE_PASSWORD=0
+     ZK_PROTOCOL=adms
+     ──────────────────────────────
+
+     Giải thích:
+     - ZK_DEVICE_IP: IP máy chấm công trên mạng LAN
+       (dùng cho chế độ pull trực tiếp, không cần thiết cho ADMS push)
+     - ZK_DEVICE_PORT: 5005 cho Ronald Jack ADMS
+     - ZK_PROTOCOL=adms: Chế độ ADMS push (máy tự gửi data lên server)
+
+     LƯU Ý: Với chế độ ADMS push qua internet (máy CC → api.hrmgo.site),
+     các biến ZK_DEVICE_IP, ZK_DEVICE_PORT chỉ mang tính tham chiếu.
+     Máy CC sẽ tự kết nối tới server thông qua cấu hình trên máy (bước 3).
+
+     Sau khi thêm, lưu file (Ctrl+O, Enter, Ctrl+X) rồi rebuild:
+     docker compose up -d --build backend
+
+
+================================================================================
+  BƯỚC 3: CẤU HÌNH MÁY CHẤM CÔNG RONALD JACK AI06F
+================================================================================
+
+     QUAN TRỌNG: Đây là bước cấu hình trực tiếp trên MÁY CHẤM CÔNG,
+     KHÔNG phải trên VPS.
+
+3.1. TRUY CẬP MENU MÁY CHẤM CÔNG:
+     - Bấm nút [M/OK] trên máy để vào Menu chính
+     - Chọn "Cài đặt truyền thông" (Comm.)
+     - Chọn "Cài đặt Mchủ" (Cloud Server Setting)
+
+3.2. CẤU HÌNH "CÀI ĐẶT MCHỦ" TRÊN MÁY:
+
+     Màn hình máy hiện có các trường sau. ĐỔI theo bảng:
+
+     ┌─────────────────────┬──────────────────┬──────────────────────────┐
+     │ Trường trên máy      │ Giá trị CŨ (LAN) │ Giá trị MỚI (VPS)       │
+     ├─────────────────────┼──────────────────┼──────────────────────────┤
+     │ Yêu cầu máy ch      │ Có               │ Có  (giữ nguyên)        │
+     │ Sử dụng tên miền    │ Không            │ Có  ← ĐỔI               │
+     │ Tên miền            │ www.yunatt.com    │ api.hrmgo.site  ← ĐỔI   │
+     │ IP server           │ 192.168.001.046  │ (bỏ qua khi dùng domain)│
+     │ Số cổng Server      │ 8000             │ 80  ← ĐỔI               │
+     │ Tốc độ              │ 3                │ 3   (giữ nguyên)        │
+     │ Ủy quyền máy c      │ Không            │ Không (giữ nguyên)      │
+     └─────────────────────┴──────────────────┴──────────────────────────┘
+
+     CHỈ CẦN ĐỔI 3 TRƯỜNG:
+     ═══════════════════════
+
+     1. "Sử dụng tên miền"  →  đổi từ Không → Có
+        (Bật lên để máy dùng domain thay vì IP)
+
+     2. "Tên miền"           →  xóa www.yunatt.com, nhập: api.hrmgo.site
+        (Domain của backend trên VPS)
+
+     3. "Số cổng Server"     →  đổi từ 8000 → 80
+        (Port 80 = HTTP, nginx trên VPS listen port 80 cho /iclock/)
+
+     CÁC TRƯỜNG KHÁC GIỮ NGUYÊN:
+     - "Yêu cầu máy ch" = Có (đã bật, giữ nguyên)
+     - "IP server" = không quan trọng khi đã bật "Sử dụng tên miền"
+     - "Tốc độ" = 3 (giữ nguyên)
+     - "Ủy quyền máy c" = Không (không dùng proxy)
+
+     GIẢI THÍCH:
+     - Port 80: Nginx trên VPS listen port 80 cho path /iclock/
+       và proxy vào Django backend (port 8000 nội bộ container)
+     - Port 8000 chỉ dùng khi kết nối trực tiếp Django trên LAN
+     - Máy CC ADMS chỉ hỗ trợ HTTP, KHÔNG hỗ trợ HTTPS (443)
+
+     ═══ PHƯƠNG ÁN DỰ PHÒNG: DÙNG IP THAY VÌ DOMAIN ═══
+
+     Nếu máy CC firmware cũ không resolve được domain (sau khi đổi mà
+     vẫn không kết nối), dùng IP trực tiếp:
+
+     ┌─────────────────────┬──────────────────────────┐
+     │ Sử dụng tên miền    │ Không                    │
+     │ IP server           │ 123.030.048.072          │
+     │ Số cổng Server      │ 80                       │
+     └─────────────────────┴──────────────────────────┘
+
+     Khi dùng IP, cần thêm IP vào ALLOWED_HOSTS trên VPS:
+     (SSH vào VPS, chạy)
+     nano backend/.env.production
+     → Sửa: ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site,123.30.48.72
+     → Ctrl+O, Enter, Ctrl+X
+     → docker compose up -d --build backend
+
+3.3. CẤU HÌNH MẠNG CHO MÁY CHẤM CÔNG:
+
+     Máy chấm công cần có kết nối internet để gửi data tới VPS.
+
+     CÁCH 1: Dùng mạng LAN có internet (khuyến nghị)
+     ┌────────────────────┬──────────────────────────────────┐
+     │ Tham số             │ Giá trị (ví dụ)                  │
+     ├────────────────────┼──────────────────────────────────┤
+     │ DHCP               │ ON (tự nhận IP) hoặc OFF (cố định)│
+     │ IP Address         │ 192.168.1.225 (nếu static)       │
+     │ Subnet Mask        │ 255.255.255.0                    │
+     │ Gateway            │ 192.168.1.1 (IP router)          │
+     │ DNS                │ 8.8.8.8 hoặc DNS nhà mạng       │
+     └────────────────────┴──────────────────────────────────┘
+
+     Menu trên máy: Comm. → Ethernet → TCP/IP
+
+     LƯU Ý:
+     - Gateway PHẢI đúng IP router trong mạng LAN
+     - DNS PHẢI được cấu hình (nếu dùng domain api.hrmgo.site)
+       Nếu DNS trống, máy không resolve được api.hrmgo.site → không kết nối được
+     - Nếu dùng DHCP, router tự cấp Gateway + DNS
+
+     CÁCH 2: Dùng WiFi (nếu máy có WiFi)
+     Menu → Comm. → WiFi → Chọn mạng → Nhập mật khẩu
+     - Đảm bảo mạng WiFi có internet
+
+3.4. XÁC NHẬN VÀ LƯU CẤU HÌNH:
+     - Sau khi nhập xong Server Address và Port, bấm OK / Save
+     - Máy sẽ tự khởi động lại kết nối
+     - Đèn mạng trên máy sẽ sáng (xanh = connected)
+
+3.5. GHI NHỚ SERIAL NUMBER (SN) CỦA MÁY:
+     Menu → System Info (Thông tin hệ thống)
+     → Ghi lại số Serial Number
+
+     Serial Number này sẽ xuất hiện trong log backend khi máy kết nối:
+     [iclock] Handshake từ SN=<serial_number>
+
+
+================================================================================
+  BƯỚC 4: KIỂM TRA KẾT NỐI MÁY CC → VPS
+================================================================================
+
+4.1. THEO DÕI LOG BACKEND REALTIME:
+     (Chạy trên VPS)
+     docker compose logs backend -f --tail 50
+
+     → Giữ terminal này mở để theo dõi
+
+4.2. KHỞI ĐỘNG LẠI MÁY CHẤM CÔNG:
+     - Tắt máy CC rồi bật lại (hoặc rút nguồn 5 giây rồi cắm lại)
+     - Hoặc: Menu → Comm. → Cloud Server Setting → bấm Test Connection (nếu có)
+
+4.3. QUAN SÁT LOG TRÊN VPS:
+     Sau khi máy CC khởi động (30-60 giây), log backend phải xuất hiện:
+
+     [iclock] Handshake từ SN=XXXXXXXXXXXX, pushver=2.4.1, options=all
+     
+     → Nếu thấy dòng này: MÁY ĐÃ KẾT NỐI THÀNH CÔNG VỚI SERVER!
+
+     Nếu KHÔNG thấy gì sau 2 phút:
+     → Xem mục XỬ LÝ SỰ CỐ ở cuối hướng dẫn
+
+4.4. TEST CHẤM CÔNG THỬ:
+     - Cho một nhân viên chấm công trên máy (quẹt vân tay / thẻ)
+     - Quan sát log backend, phải thấy:
+
+     [iclock] POST SN=XXXXXXXXXXXX, table=ATTLOG, Stamp=..., body_len=...
+     [iclock] ATTLOG saved: user_id=1, ts=2026-04-03 08:05:33, status=0
+
+     → Nghĩa là dữ liệu chấm công đã được nhận và lưu vào database
+
+4.5. KIỂM TRA QUA CURL (bổ sung):
+     Giả lập một request giống máy CC để test endpoint:
+
+     curl -X POST "http://api.hrmgo.site/iclock/cdata?SN=TEST123&table=ATTLOG&Stamp=0" \
+       -H "Content-Type: text/plain" \
+       -d "1	2026-04-03 08:05:33	1	0	0"
+
+     → Response phải là: OK: 1
+     (Nghĩa là 1 record đã được lưu)
+
+     LƯU Ý: Dữ liệu ATTLOG dùng ký tự TAB phân cách các trường.
+     Format: UserID<TAB>DateTime<TAB>Verified<TAB>Status<TAB>WorkCode
+
+     Trong đó:
+     - UserID: Mã nhân viên trên máy CC
+     - DateTime: Thời gian chấm công (YYYY-MM-DD HH:MM:SS)
+     - Verified: 1=đã xác thực
+     - Status: 0=check-in, 1=check-out, 2=break, 3=return
+     - WorkCode: mã công (thường = 0)
+
+
+================================================================================
+  BƯỚC 5: KIỂM TRA DỮ LIỆU TRÊN GIAO DIỆN WEB
+================================================================================
+
+5.1. Mở trình duyệt: https://hrmgo.site
+     → Đăng nhập bằng tài khoản admin
+
+5.2. Vào trang CHẤM CÔNG:
+     - Trang "Live Monitor" (Giám sát trực tiếp):
+       Hiển thị chấm công realtime qua WebSocket
+       → Khi nhân viên chấm công, thông tin xuất hiện ngay
+
+     - Trang "Attendance Logs" (Nhật ký chấm công):
+       Hiển thị toàn bộ lịch sử chấm công từ database
+
+     - Trang "Monthly Attendance" (Chấm công tháng):
+       Thống kê chấm công theo tháng
+
+     - Trang "Device Settings" (Cài đặt thiết bị):
+       Quản lý và theo dõi trạng thái máy chấm công
+
+5.3. KIỂM TRA DỮ LIỆU TEST:
+     Vào Attendance Logs → phải thấy record chấm công vừa test ở bước 4.4
+     Thông tin hiển thị:
+     - User ID (mã NV trên máy)
+     - Thời gian chấm công
+     - Loại (check-in / check-out)
+
+
+================================================================================
+  BƯỚC 6: ĐỒNG BỘ NHÂN VIÊN MÁY CC ↔ HỆ THỐNG
+================================================================================
+
+6.1. HIỂU CƠ CHẾ ĐỒNG BỘ:
+     - Máy CC lưu nhân viên theo User ID (số)
+     - Hệ thống ERP lưu nhân viên trong bảng Employee
+     - Khi máy CC push USERINFO, hệ thống tự tạo/cập nhật Employee
+
+     Máy CC tự push USERINFO khi:
+     - Thêm nhân viên mới trên máy
+     - Sửa thông tin nhân viên
+     - Lần đầu kết nối server (push toàn bộ)
+
+6.2. MAPPING NHÂN VIÊN:
+     - Vào trang "Employees" (Nhân viên) trên hệ thống
+     - Kiểm tra danh sách nhân viên từ máy CC đã được đồng bộ
+     - Có thể gán employee_code để map với mã nhân viên trong HRM
+
+6.3. CẤU HÌNH CA LÀM VIỆC (SHIFT):
+     - Vào trang "Shift Management" (Quản lý ca)
+     - Tạo ca làm việc:
+       Ví dụ: Ca hành chính
+       ┌────────────────┬──────────────┐
+       │ Tên ca         │ Hành chính   │
+       │ Loại ca        │ hc           │
+       │ Giờ vào        │ 08:00        │
+       │ Giờ ra         │ 17:00        │
+       └────────────────┴──────────────┘
+     - Gán ca cho từng nhân viên
+
+
+================================================================================
+  BƯỚC 7: KIỂM TRA CUỐI CÙNG - TOÀN BỘ LUỒNG
+================================================================================
+
+7.1. CHECKLIST KIỂM TRA:
+
+     □ Máy CC bật và có kết nối mạng (đèn mạng sáng)
+     □ Cloud Server Setting: api.hrmgo.site, port 80, enabled
+     □ VPS log thấy handshake từ SN máy CC
+     □ Chấm công thử → log backend nhận ATTLOG
+     □ Giao diện web hiển thị record chấm công
+     □ LiveMonitor nhận realtime khi chấm công mới
+
+7.2. TEST LUỒNG HOÀN CHỈNH:
+     1. Mở 2 tab: VPS terminal + Trình duyệt (https://hrmgo.site)
+     2. Trên VPS: docker compose logs backend -f --tail 10
+     3. Trên trình duyệt: vào trang Live Monitor
+     4. Cho nhân viên quẹt vân tay trên máy CC
+     5. Kiểm tra:
+        - VPS log: thấy [iclock] POST ... table=ATTLOG
+        - Trình duyệt: Live Monitor hiện thông tin chấm công mới
+
+     → Nếu cả 2 đều OK: HỆ THỐNG HOẠT ĐỘNG HOÀN CHỈNH!
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ MÁY CHẤM CÔNG
+================================================================================
+
+─── SỰ CỐ 0: Web hiện "Thiết bị đang kết nối" nhưng SN=healthcheck ───
+
+Nguyên nhân:
+  Docker healthcheck gọi /iclock/cdata?SN=healthcheck mỗi 30 giây
+  từ 127.0.0.1. Hệ thống nhầm tưởng là máy chấm công thật.
+
+  Triệu chứng:
+  - Trang Device Settings hiện: Số Serial = healthcheck
+  - IP thiết bị = 127.0.0.1
+  - Push cuối cập nhật liên tục mỗi 30s
+  - Nhưng KHÔNG có dữ liệu chấm công thật
+
+  → ĐÂY KHÔNG PHẢI MÁY CHẤM CÔNG THẬT, chỉ là Docker healthcheck.
+
+  Đã sửa code (zk_service.py): Bỏ qua SN=healthcheck trong device registry.
+  Sau khi deploy code mới, trang web sẽ hiện đúng trạng thái:
+  "Đang chờ máy chấm công kết nối" cho đến khi máy CC thật gửi request.
+
+  Để deploy fix:
+  1. Push code lên GitHub
+  2. Trên VPS: cd /root/erp-system && git pull
+  3. docker compose up -d --build backend
+  4. Refresh trang Device Settings → phải hiện "Đang chờ kết nối"
+
+─── SỰ CỐ A: Máy CC không kết nối, không thấy log handshake ───
+
+Nguyên nhân có thể:
+  1. Máy CC không có internet
+  2. DNS không resolve được api.hrmgo.site
+  3. Port 80 bị chặn
+  4. Cấu hình Cloud Server sai
+
+Xử lý theo thứ tự:
+
+  a) Kiểm tra mạng máy CC:
+     - Máy CC có đèn mạng sáng không?
+     - Thử ping từ máy tính cùng mạng LAN:
+       ping 192.168.1.225  (IP máy CC)
+     - Nếu không ping được → kiểm tra cáp mạng/WiFi
+
+  b) Kiểm tra máy CC resolve được domain:
+     - Từ máy tính cùng mạng LAN:
+       nslookup api.hrmgo.site
+     - Nếu không resolve → DNS trên máy CC hoặc router chưa đúng
+     - Thử cấu hình DNS trên máy CC: 8.8.8.8
+
+  c) Kiểm tra port 80 trên VPS:
+     (Trên VPS)
+     ufw status
+     → Port 80 phải ALLOW từ Anywhere
+
+     Nếu chưa:
+     ufw allow 80/tcp
+     ufw reload
+
+  d) Kiểm tra nginx proxy /iclock/ qua HTTP:
+     curl -v "http://api.hrmgo.site/iclock/cdata?SN=TEST"
+     → Phải trả về text/plain với Stamp=0, Realtime=1,...
+
+  e) Nếu curl từ VPS OK nhưng máy CC không kết nối:
+     → Vấn đề nằm ở mạng giữa máy CC và internet
+     → Kiểm tra router/firewall của mạng LAN
+
+─── SỰ CỐ B: Handshake OK nhưng không nhận được chấm công (ATTLOG) ───
+
+Nguyên nhân:
+  1. Máy CC chưa có dữ liệu chấm công mới
+  2. Máy đang ở chế độ không push realtime
+
+Xử lý:
+  a) Chấm công thử trực tiếp trên máy CC
+  b) Đợi 10-30 giây (Delay=10 trong handshake config)
+  c) Kiểm tra log: docker compose logs backend -f --tail 30
+  d) Nếu vẫn không thấy ATTLOG:
+     - Khởi động lại máy CC
+     - Máy sẽ handshake lại và push toàn bộ record chưa gửi
+
+─── SỰ CỐ C: Log nhận ATTLOG nhưng web không hiển thị ───
+
+Nguyên nhân:
+  1. WebSocket chưa kết nối đúng
+  2. Redis chưa chạy (cần cho channel layer)
+
+Xử lý:
+  a) Kiểm tra Redis:
+     docker compose ps
+     → redis phải ở trạng thái "Up"
+
+  b) Restart:
+     docker compose restart redis backend
+
+  c) Kiểm tra WebSocket từ trình duyệt:
+     - F12 → Network → WS tab
+     - Vào trang Live Monitor
+     - Phải thấy kết nối wss://api.hrmgo.site/ws/attendance/
+     - Status 101 = OK
+
+  d) Nếu WebSocket 403 hoặc không kết nối:
+     - Kiểm tra CORS trong backend/.env.production
+     - Kiểm tra nginx config có block /ws/
+
+─── SỰ CỐ D: Máy CC báo "Server Error" hoặc "Connection Failed" ───
+
+Xử lý:
+  a) Xác nhận cấu hình trên máy CC:
+     - Server Address: api.hrmgo.site (KHÔNG có http://)
+     - Port: 80
+     - Enable: ON
+
+  b) Một số máy Ronald Jack cần nhập:
+     - Domain: api.hrmgo.site
+     - KHÔNG cần nhập http:// hoặc /iclock/
+     (Máy tự thêm path /iclock/cdata khi gọi)
+
+  c) Kiểm tra firmware máy CC:
+     - Firmware cũ có thể không hỗ trợ domain, chỉ hỗ trợ IP
+     - Nếu không dùng được domain, thử dùng IP: 123.30.48.72
+       nhưng cần thêm IP vào ALLOWED_HOSTS:
+       nano backend/.env.production
+       ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site,123.30.48.72
+       docker compose up -d --build backend
+
+─── SỰ CỐ E: Dữ liệu chấm công bị trùng lặp ───
+
+Nguyên nhân: Máy CC gửi lại record đã tồn tại (ví dụ sau khi khởi động lại)
+
+Xử lý:
+  - Hệ thống đã có cơ chế chống trùng lặp qua unique constraint:
+    (user_id, timestamp)
+  - Nếu record trùng, Django sẽ bỏ qua (không tạo bản ghi mới)
+  - Không cần xử lý gì thêm
+
+─── SỰ CỐ F: Muốn dùng IP thay vì domain cho máy CC ───
+
+Nếu máy CC firmware cũ không hỗ trợ domain name:
+  1. Cấu hình trên máy CC: Server = 123.30.48.72, Port = 80
+  2. Trên VPS, thêm IP vào ALLOWED_HOSTS:
+     nano backend/.env.production
+     ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site,123.30.48.72
+     Ctrl+O → Enter → Ctrl+X
+  3. Rebuild:
+     docker compose up -d --build backend
+  4. Thêm IP vào nginx server_name (tùy chọn):
+     nano deploy/nginx.conf
+     Tìm dòng: server_name api.hrmgo.site;
+     Sửa thành: server_name api.hrmgo.site 123.30.48.72;
+     docker compose restart nginx
+
+
+================================================================================
+  GIAO THỨC ICLOCK (ADMS) - CHI TIẾT KỸ THUẬT
+================================================================================
+
+  Máy chấm công Ronald Jack AI06F giao tiếp với server qua HTTP,
+  sử dụng giao thức iclock (hay ADMS push mode).
+
+  LUỒNG GIAO TIẾP:
+  ─────────────────
+  1. Máy bật → GET /iclock/cdata?SN=<serial> (Handshake)
+     ← Server trả cấu hình: Stamp, TransFlag, Realtime...
+
+  2. Máy push data → POST /iclock/cdata?SN=<serial>&table=ATTLOG
+     Body: dữ liệu tab-separated
+     ← Server trả: OK: <số record đã lưu>
+
+  3. Máy polling lệnh → GET /iclock/getrequest?SN=<serial>
+     ← Server trả: OK (không có lệnh) hoặc lệnh cụ thể
+
+  4. Máy xác nhận lệnh → POST /iclock/devicecmd?SN=<serial>
+     Body: kết quả thực thi lệnh
+
+  ENDPOINTS:
+  ──────────
+  ┌─────────────────────────────────────────────┬──────────┬──────────────────────┐
+  │ URL                                         │ Method   │ Mục đích             │
+  ├─────────────────────────────────────────────┼──────────┼──────────────────────┤
+  │ /iclock/cdata?SN=xxx                        │ GET      │ Handshake            │
+  │ /iclock/cdata?SN=xxx&table=ATTLOG           │ POST     │ Push chấm công       │
+  │ /iclock/cdata?SN=xxx&table=OPERLOG          │ POST     │ Push log vận hành    │
+  │ /iclock/cdata?SN=xxx&table=USERINFO         │ POST     │ Push thông tin NV    │
+  │ /iclock/getrequest?SN=xxx                   │ GET      │ Máy xin lệnh        │
+  │ /iclock/devicecmd?SN=xxx                    │ POST     │ Xác nhận lệnh       │
+  │ /cdata?SN=xxx                               │ GET/POST │ Alias (tương thích)  │
+  └─────────────────────────────────────────────┴──────────┴──────────────────────┘
+
+  ĐỊNH DẠNG ATTLOG (dữ liệu chấm công):
+  ───────────────────────────────────────
+  Mỗi dòng = 1 lần chấm công, các trường phân cách bằng TAB:
+
+  UserID<TAB>DateTime<TAB>Verified<TAB>Status<TAB>WorkCode
+
+  Ví dụ:
+  1	2026-04-03 08:05:33	1	0	0
+  2	2026-04-03 08:10:12	1	1	0
+
+  ┌──────────┬──────────────────────────────────────────────┐
+  │ Trường   │ Ý nghĩa                                      │
+  ├──────────┼──────────────────────────────────────────────┤
+  │ UserID   │ Mã NV trên máy CC (khớp với Employee.user_id)│
+  │ DateTime │ YYYY-MM-DD HH:MM:SS hoặc YYYY/MM/DD HH:MM:SS│
+  │ Verified │ 0=chưa xác thực, 1=đã xác thực              │
+  │ Status   │ 0=check-in, 1=check-out, 2=break,           │
+  │          │ 3=return, 4-5=overtime                        │
+  │ WorkCode │ Mã công (thường = 0)                         │
+  └──────────┴──────────────────────────────────────────────┘
+
+
+================================================================================
+  TÓM TẮT NHANH
+================================================================================
+
+  CẤU HÌNH TRÊN MÁY CC:
+    Server Address = api.hrmgo.site
+    Port = 80
+    Enable Cloud = ON
+
+  KIỂM TRA TRÊN VPS:
+    docker compose logs backend -f
+    → Thấy [iclock] Handshake = đã kết nối
+    → Thấy [iclock] POST ATTLOG = đã nhận chấm công
+
+  XEM TRÊN WEB:
+    https://hrmgo.site → Chấm công → Live Monitor / Attendance Logs
+
+================================================================================
+  HOÀN TẤT CÀI ĐẶT MÁY CHẤM CÔNG!
+================================================================================

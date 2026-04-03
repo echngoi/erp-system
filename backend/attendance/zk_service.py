@@ -164,8 +164,14 @@ _adms_device_registry = {}
 ADMS_ONLINE_THRESHOLD = 120  # seconds — nếu không liên lạc > 120s → offline
 
 
+# Serial numbers to ignore (Docker healthcheck, test requests)
+_ADMS_IGNORED_SNS = {'healthcheck', 'TEST123', 'TEST', 'test'}
+
+
 def adms_record_contact(sn, ip=None, devinfo=None):
-    """Ghi nhận máy chấm công vừa liên lạc."""
+    """Ghi nhận máy chấm công vừa liên lạc (bỏ qua healthcheck)."""
+    if sn in _ADMS_IGNORED_SNS:
+        return
     entry = _adms_device_registry.get(sn, {})
     entry.update({
         'last_seen': datetime.now(),
@@ -178,10 +184,12 @@ def adms_record_contact(sn, ip=None, devinfo=None):
 
 
 def adms_get_last_contact():
-    """Lấy thông tin liên lạc gần nhất từ bất kỳ máy nào."""
-    if not _adms_device_registry:
+    """Lấy thông tin liên lạc gần nhất từ máy thật (bỏ qua healthcheck)."""
+    real_devices = {k: v for k, v in _adms_device_registry.items()
+                    if k not in _ADMS_IGNORED_SNS}
+    if not real_devices:
         return None
-    latest = max(_adms_device_registry.values(), key=lambda x: x['last_seen'])
+    latest = max(real_devices.values(), key=lambda x: x['last_seen'])
     return latest
 
 

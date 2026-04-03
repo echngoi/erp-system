@@ -127,7 +127,7 @@ export default function DeviceSettings() {
                   <Text copyable code>{protocol?.server_ip || 'IP_CỦA_MÁY_TÍNH'}</Text>
                 </Descriptions.Item>
                 <Descriptions.Item label="Port">
-                  <Text copyable code>8000</Text>
+                  <Text copyable code>{window.location.hostname === 'localhost' ? '8000' : '80'}</Text>
                 </Descriptions.Item>
               </Descriptions>
               <Text type="secondary">

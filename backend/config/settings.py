@@ -33,7 +33,7 @@ SECRET_KEY = 'django-insecure-d)sjr@v_i%fi4kv6#9hyk1m8mw^n*yr8t301koo^soxh_xhty^
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '192.168.1.46', '*']
+ALLOWED_HOSTS = ['127.0.0.1', 'localhost', '192.168.1.46', '*', 'erp-system-nine-zeta.vercel.app','api.hrmgo.site']
 
 
 # Application definition
