@@ -215,11 +215,16 @@ def build_response(packet: ZKPacket, resp_cmd: int, server_seq: int = 0, payload
 
 
 def build_register_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
-    """Build registration ACK with ZK epoch timestamp payload."""
-    # ZK machines expect seconds since 2000-01-01, NOT Unix epoch
-    now_ts = int(datetime.now().timestamp()) - ZK_EPOCH_OFFSET
-    ts_payload = struct.pack('<I', now_ts)
-    return build_response(packet, CMD_REGISTER_ACK, server_seq, ts_payload)
+    """Build registration ACK by echoing the raw device packet.
+
+    Only the command bytes (offset 2-3) are changed from
+    REGISTER(0x0001) to REGISTER_ACK(0x0002).
+    All other header fields and payload are preserved exactly
+    as received — this ensures maximum firmware compatibility.
+    """
+    ack = bytearray(packet.raw)
+    struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+    return bytes(ack)
 
 
 def build_heartbeat_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
