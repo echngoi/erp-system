@@ -181,61 +181,62 @@ def parse_packet(data: bytes) -> Optional[ZKPacket]:
 
 # ── Response Building ──────────────────────────────────────────────────────────
 
-def build_response(packet: ZKPacket, resp_cmd: int, server_seq: int = 0, payload: bytes = b'') -> bytes:
-    """Build a response packet with correct sequence handling."""
-    header = bytearray(HEADER_SIZE)
+def _compute_checksum(data: bytes) -> int:
+    """Compute A5 5A protocol checksum.
 
-    # Magic
-    header[0:2] = MAGIC
+    byte[14] = sum(bytes[2] through bytes[12]) & 0xFF
 
-    # Response command
-    struct.pack_into('<H', header, 2, resp_cmd)
+    Verified against 10+ real device packets from Ronald Jack AI06F
+    (SN=ZXRC13013923).
+    """
+    return sum(data[2:13]) & 0xFF
 
-    # Sequence counters (critical for device acceptance)
-    header[4] = server_seq & 0xFF          # Server's own send counter
-    header[5] = packet.send_seq & 0xFF     # Acknowledge device's send_seq
 
-    # Protocol version (bytes 6-7)
-    pv = packet.proto_ver if len(packet.proto_ver) >= 2 else b'b1'
-    header[6:8] = pv[:2]
-
-    # Mirror session
-    if len(packet.session) >= 4:
-        header[8:12] = packet.session[:4]
-
-    # Mirror flags
-    if len(packet.flags) >= 4:
-        header[12:16] = packet.flags[:4]
-
-    # Serial number
-    sn_bytes = packet.serial_number.encode('ascii')[:SN_SIZE]
-    header[SN_OFFSET:SN_OFFSET + len(sn_bytes)] = sn_bytes
-
-    return bytes(header) + payload
+def _apply_checksum(data: bytearray) -> bytearray:
+    """Recompute and set checksum byte at offset 14."""
+    if len(data) >= 15:
+        data[14] = _compute_checksum(data)
+    return data
 
 
 def build_register_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
     """Build registration ACK by echoing the raw device packet.
 
-    Only the command bytes (offset 2-3) are changed from
-    REGISTER(0x0001) to REGISTER_ACK(0x0002).
+    Changes:
+      1. Command (bytes 2-3): REGISTER(0x0001) → REGISTER_ACK(0x0002)
+      2. Checksum (byte 14): Recomputed to match new command
+
     All other header fields and payload are preserved exactly
     as received — this ensures maximum firmware compatibility.
     """
     ack = bytearray(packet.raw)
     struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+    _apply_checksum(ack)
     return bytes(ack)
 
 
 def build_heartbeat_ack(packet: ZKPacket, server_seq: int = 0) -> bytes:
-    """Build heartbeat ACK."""
-    return build_response(packet, CMD_HEARTBEAT_ACK, server_seq)
+    """Build heartbeat ACK by echoing and changing cmd + checksum."""
+    ack = bytearray(packet.raw)
+    struct.pack_into('<H', ack, 2, CMD_HEARTBEAT_ACK)
+    _apply_checksum(ack)
+    return bytes(ack)
 
 
 def build_data_ack(packet: ZKPacket, cmd_ack: int, server_seq: int = 0, count: int = 0) -> bytes:
-    """Build data push ACK with record count."""
-    count_payload = struct.pack('<I', count)
-    return build_response(packet, cmd_ack, server_seq, count_payload)
+    """Build data push ACK by echoing and changing cmd + checksum."""
+    ack = bytearray(packet.raw)
+    struct.pack_into('<H', ack, 2, cmd_ack)
+    _apply_checksum(ack)
+    return bytes(ack)
+
+
+def build_response(packet: ZKPacket, resp_cmd: int, server_seq: int = 0, payload: bytes = b'') -> bytes:
+    """Build a generic response (fallback for unknown commands)."""
+    ack = bytearray(packet.raw)
+    struct.pack_into('<H', ack, 2, resp_cmd)
+    _apply_checksum(ack)
+    return bytes(ack)
 
 
 # ── Attendance Data Parsing ────────────────────────────────────────────────────
