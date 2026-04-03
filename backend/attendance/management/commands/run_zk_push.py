@@ -40,6 +40,28 @@ logger = logging.getLogger('attendance.zk_push')
 # Timeout: close connection if no data for this many seconds
 CLIENT_TIMEOUT = 300  # 5 minutes
 
+# ── Multi-strategy ACK for REGISTER ──────────────────────────────────────────
+# The device immediately RSTs on ANY binary ACK but gracefully closes after
+# 10s with no response. We cycle through fundamentally different response
+# formats to discover what the firmware actually expects.
+_register_strategy_counter = 0
+REGISTER_STRATEGIES = [
+    # 0: HTTP 200 response (device was originally configured for HTTP port 80)
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nOK\n",
+    # 1: ADMS iclock-style response (what ZKTeco HTTP push expects)
+    b"HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\n"
+    b"Stamp=0\nOpStamp=0\nErrorDelay=60\nDelay=30\nTransTimes=00:00;14:05\n"
+    b"TransInterval=1\nTransFlag=TransData AttLog OpLog\nRealtime=1\nEncrypt=0\n",
+    # 2: Plain text OK
+    b"OK\n",
+    # 3: Minimal 4-byte binary (just magic + cmd, no header)
+    MAGIC + b"\x02\x00",
+    # 4: 36-byte header only (no payload), all zeros except magic+cmd
+    MAGIC + b"\x02\x00" + b"\x00" * 32,
+    # 5: Echo raw packet with reversed magic (5A A5 instead of A5 5A)
+    None,  # Special: built dynamically from raw packet with reversed magic
+]
+
 
 class ZKPushClientHandler:
     """Handles a single TCP connection from an attendance machine."""
@@ -162,44 +184,39 @@ class ZKPushClientHandler:
             await self._handle_unknown(packet)
 
     async def _handle_register(self, packet):
-        """Handle device registration/handshake.
+        """Handle device registration — try rotating strategies."""
+        global _register_strategy_counter
 
-        Strategy: Try multiple ACK formats. The device resets connection
-        if the ACK format is wrong. We cycle through strategies to find
-        the one that works.
-
-        Known facts from packet analysis:
-          - Device sends 48B: 36B header + 12B zero payload
-          - Byte 4 = send_seq (increments), Byte 5 = recv_seq (0x80+)
-          - proto_ver = b'b1'
-
-        Strategies tried:
-          1. Custom header + timestamp payload (40B) → RESET
-          2. Echo raw 48B, change cmd only → RESET
-          3. No response (keep connection alive) → testing now
-          4. Header-only 36B, swap sequences → fallback
-        """
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
                        f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
                        f"proto_ver={packet.proto_ver}")
         logger.info(f"[ZK-TCP] REGISTER raw ({len(packet.raw)}B): {packet.raw.hex()}")
-        if packet.payload:
-            logger.info(f"[ZK-TCP] REGISTER payload ({len(packet.payload)}B): {packet.payload.hex()}")
 
         self.registered = True
         self.serial_number = packet.serial_number
-
-        # Record contact in device registry
         await self._record_device_contact()
 
-        # ──────────────────────────────────────────────────────────────
-        # STRATEGY 3: Do NOT send any ACK.
-        # Just keep the TCP connection alive and wait.
-        # If device needs no ACK, it will stay connected and send
-        # heartbeat or ATTLOG data next.
-        # ──────────────────────────────────────────────────────────────
-        logger.warning(f"[ZK-TCP] Strategy: NOT sending ACK, keeping connection alive. "
-                       f"Waiting for device to send next packet...")
+        # Pick next strategy (rotate through all)
+        strategy_idx = _register_strategy_counter % len(REGISTER_STRATEGIES)
+        _register_strategy_counter += 1
+
+        # Build response for this strategy
+        if strategy_idx == 5:
+            # Special: echo raw packet with reversed magic (5A A5)
+            response = bytearray(packet.raw)
+            response[0:2] = b'\x5a\xa5'
+            struct.pack_into('<H', response, 2, 0x0002)
+            response = bytes(response)
+        else:
+            response = REGISTER_STRATEGIES[strategy_idx]
+
+        logger.warning(f"[ZK-TCP] ▶ Strategy #{strategy_idx}: "
+                       f"sending {len(response)}B: {response[:80]}")
+        logger.info(f"[ZK-TCP] Strategy #{strategy_idx} hex: {response.hex()}")
+
+        # Small delay before sending — some devices need time
+        await asyncio.sleep(0.1)
+        await self._send(response)
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
