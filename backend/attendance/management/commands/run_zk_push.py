@@ -49,19 +49,18 @@ CLIENT_TIMEOUT = 300  # 5 minutes
 _register_strategy_counter = 0
 
 REGISTER_STRATEGIES = [
-    # ── ROUND 7: Size sweep (6-14B) + delay + non-A5-5A magic ──
-    # Known: 4B→5s timeout FIN, 16B→20ms parse+FIN, 17B+→RST
-    # Gap: never tested 5-15 bytes! Find where device starts parsing.
-    # Also test: delayed response, different magic bytes
-    "SIZE_6B",           # 0: a5 5a + 4 bytes (minimal cmd+checksum)
-    "SIZE_8B",           # 1: a5 5a + 6 bytes
-    "SIZE_10B",          # 2: a5 5a + 8 bytes
-    "SIZE_12B",          # 3: a5 5a + 10 bytes
-    "SIZE_14B",          # 4: a5 5a + 12 bytes
-    "DELAY_500MS",       # 5: Wait 500ms THEN send 16B cmd=0x0002
-    "DELAY_2S",          # 6: Wait 2s THEN send 16B cmd=0x0002
-    "ZK_STD_MAGIC",      # 7: 50 50 82 7D magic (standard ZK) in 16B
-    "NO_MAGIC_16B",      # 8: 16B response WITHOUT a5 5a (starts 00 00)
+    # ── ROUND 8: CHANGE THE FLOW + new cmd values in 16B ──
+    # After 58+ content/size variations, ALL failed.
+    # New approach: change the COMMUNICATION FLOW, not just content.
+    "SERVER_FIRST",      # 0: Send 16B greeting IMMEDIATELY on connect, BEFORE device sends
+    "TWO_SEGMENTS",      # 1: Split 16B into 8B + 8B with 10ms gap (different TCP segments)
+    "ACK_THEN_CMD",      # 2: Send 16B ACK, wait 100ms, send second 16B
+    "CMD_07D0",          # 3: cmd=0x07D0 (CMD_ACK_OK from standard ZK) in 16B
+    "CMD_03E8",          # 4: cmd=0x03E8 (CMD_CONNECT from standard ZK) in 16B
+    "REVERSED_MAGIC",    # 5: 5A A5 reversed magic in 16B
+    "BOTH_SEQ_ZERO",     # 6: byte4=0, byte5=0, cmd=0x0002 in 16B
+    "SESSION_ID",        # 7: bytes[8-11] = 0x00000001 (non-zero session) in 16B
+    "HALF_CLOSE",        # 8: Send 16B ACK then shutdown write (half-close TCP)
     "NO_RESPONSE",       # 9: Control — send nothing
 ]
 
@@ -80,8 +79,22 @@ class ZKPushClientHandler:
 
     async def handle(self):
         """Main connection handler loop."""
+        global _register_strategy_counter
         ip = self.addr[0] if self.addr else 'unknown'
         logger.warning(f"[ZK-TCP] New connection from {ip}")
+
+        # ── SERVER_FIRST: send greeting BEFORE device speaks ──
+        strategy_idx = _register_strategy_counter % len(REGISTER_STRATEGIES)
+        strategy = REGISTER_STRATEGIES[strategy_idx]
+        if strategy == "SERVER_FIRST":
+            _register_strategy_counter += 1
+            logger.warning(f"[ZK-TCP] ▶ Strategy #{strategy_idx}: SERVER_FIRST — sending greeting before device speaks")
+            # Build a generic 16B greeting: A5 5A + cmd=0x0002 + zeros
+            greeting = bytearray(b'\xa5\x5a\x02\x00\x00\x00\x62\x31\x00\x00\x00\x00\x00\x01\x00\x02')
+            _apply_checksum(greeting)
+            greeting_bytes = bytes(greeting)
+            logger.info(f"[ZK-TCP] Sending SERVER_FIRST 16B: {greeting_bytes.hex()}")
+            await self._send(greeting_bytes)
 
         try:
             while True:
@@ -204,74 +217,107 @@ class ZKPushClientHandler:
         self.serial_number = packet.serial_number
         await self._record_device_contact()
 
+        # ── Strategies that were handled in handle() already ──
+        if strategy == "SERVER_FIRST":
+            # Already sent greeting in handle(). Now send another ACK after REGISTER.
+            ack = bytearray(packet.raw[:16])
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            _apply_checksum(ack)
+            ack_bytes = bytes(ack)
+            logger.info(f"[ZK-TCP] SERVER_FIRST: additional ACK after REGISTER: {ack_bytes.hex()}")
+            await self._send(ack_bytes)
+            return
+
         # ── NO_RESPONSE: control — send nothing ──
         if strategy == "NO_RESPONSE":
             logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
             return
 
-        # ── SIZE sweep: 6B to 14B ──
-        size_map = {"SIZE_6B": 6, "SIZE_8B": 8, "SIZE_10B": 10, "SIZE_12B": 12, "SIZE_14B": 14}
-        if strategy in size_map:
-            target_size = size_map[strategy]
-            # Build: a5 5a + cmd 0x0002 LE + fill remaining with echoed header bytes
-            ack = bytearray(b'\xa5\x5a\x02\x00')  # magic + cmd=0x0002
-            # Fill rest from original packet header (bytes 4 onward)
-            remaining = target_size - 4
-            if remaining > 0:
-                ack += bytearray(packet.raw[4:4 + remaining])
-            ack_bytes = bytes(ack[:target_size])
-            logger.info(f"[ZK-TCP] Sending {strategy} ({len(ack_bytes)}B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
+        # ── TWO_SEGMENTS: split 16B into two TCP writes ──
+        if strategy == "TWO_SEGMENTS":
+            ack = bytearray(packet.raw[:16])
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            _apply_checksum(ack)
+            part1 = bytes(ack[:8])
+            part2 = bytes(ack[8:])
+            logger.info(f"[ZK-TCP] TWO_SEGMENTS: sending 8B+8B: {part1.hex()} | {part2.hex()}")
+            self.writer.write(part1)
+            await self.writer.drain()
+            await asyncio.sleep(0.01)  # 10ms gap between segments
+            self.writer.write(part2)
+            await self.writer.drain()
             return
 
-        # ── DELAY strategies: wait before sending 16B ──
-        if strategy == "DELAY_500MS":
-            logger.info(f"[ZK-TCP] Waiting 500ms before response...")
-            await asyncio.sleep(0.5)
+        # ── ACK_THEN_CMD: send ACK, wait 100ms, send second packet ──
+        if strategy == "ACK_THEN_CMD":
             ack = bytearray(packet.raw[:16])
             struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
             _apply_checksum(ack)
             ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending DELAY_500MS 16B: {ack_bytes.hex()}")
+            logger.info(f"[ZK-TCP] ACK_THEN_CMD: first 16B ACK: {ack_bytes.hex()}")
             await self._send(ack_bytes)
+            await asyncio.sleep(0.1)  # 100ms gap
+            # Second packet: cmd=0x0005 (ATTLOG request-like)
+            cmd2 = bytearray(packet.raw[:16])
+            struct.pack_into('<H', cmd2, 2, 0x0005)
+            _apply_checksum(cmd2)
+            cmd2_bytes = bytes(cmd2)
+            logger.info(f"[ZK-TCP] ACK_THEN_CMD: second 16B cmd: {cmd2_bytes.hex()}")
+            await self._send(cmd2_bytes)
             return
 
-        if strategy == "DELAY_2S":
-            logger.info(f"[ZK-TCP] Waiting 2s before response...")
-            await asyncio.sleep(2.0)
+        # ── HALF_CLOSE: send 16B then shutdown write end ──
+        if strategy == "HALF_CLOSE":
             ack = bytearray(packet.raw[:16])
             struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
             _apply_checksum(ack)
             ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending DELAY_2S 16B: {ack_bytes.hex()}")
+            logger.info(f"[ZK-TCP] HALF_CLOSE: send 16B then shutdown write: {ack_bytes.hex()}")
             await self._send(ack_bytes)
+            try:
+                self.writer.write_eof()
+                await self.writer.drain()
+                logger.info(f"[ZK-TCP] HALF_CLOSE: write end shutdown, still reading")
+            except Exception as e:
+                logger.warning(f"[ZK-TCP] HALF_CLOSE: write_eof error: {e}")
             return
 
-        # ── ZK_STD_MAGIC: use standard ZK protocol magic 50 50 82 7D ──
-        if strategy == "ZK_STD_MAGIC":
-            ack = bytearray(b'\x50\x50\x82\x7d')  # standard ZK magic
-            # Fill with cmd=0x0002 and echoed bytes to make 16B
-            ack += bytearray(packet.raw[4:16])
-            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # overwrite bytes 2-3
-            # Don't apply A5 5A checksum — different protocol
-            ack_bytes = bytes(ack[:16])
-            logger.info(f"[ZK-TCP] Sending ZK_STD_MAGIC 16B: {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
+        # ── All remaining strategies: 16B with different content ──
+        ack = bytearray(packet.raw[:16])
 
-        # ── NO_MAGIC_16B: 16B without A5 5A magic ──
-        if strategy == "NO_MAGIC_16B":
-            ack = bytearray(packet.raw[:16])
-            ack[0] = 0x00  # kill magic byte 1
-            ack[1] = 0x00  # kill magic byte 2
+        if strategy == "CMD_07D0":
+            # cmd=0x07D0 = CMD_ACK_OK in standard ZK protocol
+            struct.pack_into('<H', ack, 2, 0x07D0)
+            _apply_checksum(ack)
+
+        elif strategy == "CMD_03E8":
+            # cmd=0x03E8 = CMD_CONNECT in standard ZK protocol
+            struct.pack_into('<H', ack, 2, 0x03E8)
+            _apply_checksum(ack)
+
+        elif strategy == "REVERSED_MAGIC":
+            # Swap magic: 5A A5 instead of A5 5A
             struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
-            ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending NO_MAGIC_16B: {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
+            ack[0] = 0x5A
+            ack[1] = 0xA5
+            _apply_checksum(ack)
 
-        # Fallback (shouldn't reach here)
-        logger.warning(f"[ZK-TCP] Unknown strategy: {strategy}")
+        elif strategy == "BOTH_SEQ_ZERO":
+            # Zero both sequence bytes
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            ack[4] = 0x00
+            ack[5] = 0x00
+            _apply_checksum(ack)
+
+        elif strategy == "SESSION_ID":
+            # Non-zero session: bytes[8-11] = 0x00000001
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            struct.pack_into('<I', ack, 8, 1)  # session_id = 1
+            _apply_checksum(ack)
+
+        ack_bytes = bytes(ack)
+        logger.info(f"[ZK-TCP] Sending 16B [{strategy}]: {ack_bytes.hex()}")
+        await self._send(ack_bytes)
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
