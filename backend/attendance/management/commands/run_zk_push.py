@@ -500,7 +500,9 @@ def _sync_save_attendance(records, sn):
             if timezone.is_naive(ts):
                 ts = timezone.make_aware(ts)
 
-            employee = Employee.objects.filter(user_id=rec.user_id).first()
+            employee = Employee.objects.select_related(
+                'linked_user__department'
+            ).filter(user_id=rec.user_id).first()
             _, created = AttendanceLog.objects.get_or_create(
                 user_id=rec.user_id,
                 timestamp=ts,
@@ -512,9 +514,16 @@ def _sync_save_attendance(records, sn):
             )
             if created:
                 saved += 1
+                dept = ''
+                if employee:
+                    linked = getattr(employee, 'linked_user', None)
+                    if linked and linked.department:
+                        dept = linked.department.name
                 new_records.append({
                     'user_id': rec.user_id,
-                    'employee_name': employee.name if employee else rec.user_id,
+                    'employee_name': employee.display_name if employee else rec.user_id,
+                    'employee_code': employee.employee_code if employee else '',
+                    'department': dept,
                     'timestamp': tz.localtime(ts).strftime('%Y-%m-%d %H:%M:%S'),
                     'punch': rec.punch,
                 })
