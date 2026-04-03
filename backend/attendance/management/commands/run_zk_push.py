@@ -177,19 +177,42 @@ class ZKPushClientHandler:
         """Handle REGISTER — send 16-byte reversed-magic ACK.
 
         Protocol reverse-engineered from Mita Pro 2024 ADMS capture:
-        Connection #1 (probe) always closes after ACK — this is normal.
-        Connection #2 (after 3.5s gap) stays connected.
-        On WAN, device rapid-reconnects every 30ms and gets stuck in probe mode.
-        Fix: suppress ACK for rapid reconnects to force device to slow down.
+        - First REGISTER on a connection: ACK with byte[4] = seq+1
+        - Subsequent REGISTERs (heartbeat): ACK with byte[4] = echo seq
+        - Rate limiting only applies to FIRST REGISTER of NEW connections
+        - Device needs 2-4 probe/settle cycles before staying connected on WAN
         """
         ip = self.addr[0] if self.addr else 'unknown'
         now = time.time()
+        raw = packet.raw
+
+        # ── CASE 1: Already registered on THIS connection (heartbeat) ─────
+        # Always ACK immediately — never rate-limit heartbeat REGISTERs!
+        # From Mita Pro capture: heartbeat ACKs use echo seq (not seq+1)
+        if self.registered:
+            _device_last_ack_time[ip] = now
+            logger.info(f"[ZK-TCP] 💓 Heartbeat REGISTER from SN={packet.serial_number} "
+                        f"seq={packet.send_seq} — sending echo ACK")
+
+            ack = bytearray(16)
+            ack[0:2] = b'\x5a\xa5'
+            ack[2:4] = raw[2:4]
+            ack[4] = raw[4]                   # ECHO seq (not +1) for heartbeat
+            ack[5] = raw[5]
+            ack[6:8] = raw[6:8]
+            ack[8:12] = raw[8:12]
+            ack[12] = 0x32
+            ack[13] = 0x01
+            ack[14] = sum(ack[0:14]) & 0xFF
+            ack[15] = raw[15]
+
+            await self._send(bytes(ack))
+            return
+
+        # ── CASE 2: First REGISTER on new connection — rate limit ─────────
         last_ack = _device_last_ack_time.get(ip, 0)
         gap = now - last_ack
 
-        # Rate limiting: if device reconnects too fast, don't send ACK.
-        # Device will timeout, eventually slow to 3+ second intervals,
-        # then get ACK and stay connected (like Mita Pro connection #2).
         if gap < RAPID_RECONNECT_THRESHOLD:
             count = _device_rapid_count.get(ip, 0) + 1
             _device_rapid_count[ip] = count
@@ -199,7 +222,7 @@ class ZKPushClientHandler:
                                f"— suppressing ACK, waiting for device to settle")
             return  # Don't send ACK — device will timeout and slow down
 
-        # Gap is sufficient — this should be a "real" connection (like Mita Pro connection #2)
+        # Gap is sufficient — send ACK (first REGISTER with seq+1)
         rapid_count = _device_rapid_count.get(ip, 0)
         if rapid_count > 0:
             logger.warning(f"[ZK-TCP] ✓ Device {packet.serial_number} settled down "
@@ -217,13 +240,12 @@ class ZKPushClientHandler:
         self.serial_number = packet.serial_number
         await self._record_device_contact()
 
-        # Build 16-byte ACK (reverse-engineered from Mita Pro ADMS on port 7005)
-        raw = packet.raw
+        # Build 16-byte ACK — first REGISTER uses seq+1 (verified from Mita Pro)
         ack = bytearray(16)
         ack[0:2] = b'\x5a\xa5'           # Reversed magic (server→device)
         ack[2:4] = raw[2:4]              # Echo command (01 00 = REGISTER)
-        ack[4] = (raw[4] + 1) & 0xFF     # Server send_seq = client_seq + 1 (verified from Mita Pro capture)
-        ack[5] = raw[5]                   # Echo client's recv_seq byte (verified from Mita Pro capture)
+        ack[4] = (raw[4] + 1) & 0xFF     # seq+1 for FIRST register on connection
+        ack[5] = raw[5]                   # Echo client's recv_seq byte
         ack[6:8] = raw[6:8]              # Echo proto_ver ("b1")
         ack[8:12] = raw[8:12]            # Echo session/comm-key bytes from client
         ack[12] = 0x32                    # ACK status code
