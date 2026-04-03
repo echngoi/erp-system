@@ -1,0 +1,202 @@
+================================================================================
+  HƯỚNG DẪN: DÙNG TCP PROXY ĐỂ BẮT PROTOCOL MITA PRO
+  Mục đích: Capture CHÍNH XÁC bytes Mita Pro gửi cho máy CC
+  Chỉ cần làm 1 lần để lấy dữ liệu, sau đó clone y hệt vào server
+================================================================================
+
+  TÓM TẮT:
+  - Proxy chạy giữa máy CC ↔ Mita Pro
+  - Máy CC → Proxy (port 7006) → Mita Pro (port 7005)
+  - Proxy ghi lại TOÀN BỘ bytes cả 2 chiều ra log
+
+
+================================================================================
+  BƯỚC 1: BẬT MITA PRO TRÊN PC (nếu chưa bật)
+================================================================================
+
+  1. Mở Mita Pro 2024 trên PC
+  2. Vào cài đặt → chọn chế độ ADMS hoặc "ZK Push" tương tự
+  3. Đảm bảo Mita Pro đang LẮNG NGHE trên port 7005
+  4. Kiểm tra trong PowerShell:
+
+       netstat -ano | findstr :7005
+
+     → Phải thấy dòng: TCP  0.0.0.0:7005  LISTENING
+     → Nếu không có → Mita Pro chưa mở port 7005
+
+
+================================================================================
+  BƯỚC 2: MỞ FIREWALL WINDOWS CHO PORT 7006
+================================================================================
+
+  Mở PowerShell với quyền Administrator, chạy:
+
+    netsh advfirewall firewall add rule name="ZK Proxy 7006" dir=in action=allow protocol=TCP localport=7006
+
+  Kiểm tra lại:
+    netstat -ano | findstr :7006
+
+  → Sau khi proxy khởi động sẽ thấy dòng LISTENING
+
+
+================================================================================
+  BƯỚC 3: CHẠY TCP PROXY TRÊN PC
+================================================================================
+
+  Mở PowerShell MỚI (không cần quyền Admin), chạy:
+
+    cd "d:\myproject\ERP (COPY)\deploy"
+    python tcp_proxy.py --listen-port 7006 --target-port 7005 --log-file proxy_capture.log
+
+  → Phải thấy output:
+    ######################################################################
+    # TCP Proxy started at 2026-04-03 ...
+    # Listen: 0.0.0.0:7006
+    # Target: 127.0.0.1:7005
+    # Log:    proxy_capture.log
+    ######################################################################
+    Waiting for device to connect on port 7006...
+
+  → KHÔNG đóng cửa sổ này, để chạy nền
+
+
+  ─── NẾU BÁO LỖI "python not found" ───
+
+  Thử:
+    py tcp_proxy.py --listen-port 7006 --target-port 7005 --log-file proxy_capture.log
+
+  Hoặc kiểm tra Python có không:
+    python --version
+    py --version
+
+
+  ─── NẾU BÁO LỖI "Connection refused" khi device kết nối ───
+
+  Nghĩa là Mita Pro chưa chạy trên port 7005.
+  → Kiểm tra lại Bước 1 trước
+
+
+================================================================================
+  BƯỚC 4: TÌM IP CỦA PC TRONG MẠNG LAN
+================================================================================
+
+  Trong PowerShell:
+
+    ipconfig | findstr "IPv4"
+
+  → Tìm dòng dạng: IPv4 Address. . .: 192.168.1.46
+
+  → Đây là địa chỉ sẽ nhập vào máy CC (ví dụ: 192.168.001.046)
+
+
+================================================================================
+  BƯỚC 5: ĐỔI CẤU HÌNH MÁY CHẤM CÔNG → TRỎ VỀ PC
+================================================================================
+
+  Trên máy Ronald Jack AI06F: Menu → Cài đặt Mchủ
+
+  ┌──────────────────────┬──────────────────────────────────────────────────┐
+  │ Sử dụng tên miền     │ Không                                            │
+  │ IP server            │ 192.168.001.046  ← IP PC của bạn (thay đúng IP) │
+  │ Số cổng Server       │ 7006             ← Port proxy                   │
+  │ Yêu cầu máy ch       │ Có                                               │
+  └──────────────────────┴──────────────────────────────────────────────────┘
+
+  → Lưu → Tắt máy CC (rút điện) 10 giây → Bật lại
+
+
+================================================================================
+  BƯỚC 6: QUAN SÁT OUTPUT PROXY VÀ ĐỢI KẾT NỐI
+================================================================================
+
+  Nhìn vào cửa sổ PowerShell đang chạy proxy:
+
+  Khi máy CC kết nối (sau 30-60 giây), phải thấy:
+
+    ======================================================================
+    CONNECTION #1 from 192.168.1.225:xxxxx
+    ======================================================================
+      Connected to Mita Pro at 127.0.0.1:7005
+    [18:14:06.918] DEVICE→MITA (48B): a55a0100...
+                     bytes: a5 5a 01 00 ...
+    [18:14:06.920] MITA→DEVICE (16B): 5aa501...
+                     bytes: 5a a5 01 00 ...
+
+  → ĐÂY CHÍNH LÀ DỮ LIỆU TA CẦN!
+
+
+================================================================================
+  BƯỚC 7: SAO CHÉP LOG VÀ GỬI ĐỂ PHÂN TÍCH
+================================================================================
+
+  Log được lưu tự động vào:
+    d:\myproject\ERP (COPY)\deploy\proxy_capture.log
+
+  Mở file đó và copy TOÀN BỘ nội dung, đặc biệt các dòng:
+    - DEVICE→MITA: bytes thiết bị gửi lên (REGISTER packet)
+    - MITA→DEVICE: bytes Mita Pro trả lời (đây là ACK cần copy!)
+
+  Gửi nội dung này để phân tích và fix server.
+
+
+================================================================================
+  BƯỚC 8: SAU KHI XONG — ĐỔI MÁY CC VỀ VPS
+================================================================================
+
+  1. Nhấn Ctrl+C trong cửa sổ PowerShell để dừng proxy
+
+  2. Trên máy Ronald Jack AI06F: Menu → Cài đặt Mchủ
+
+     ┌──────────────────────┬──────────────────────────┐
+     │ Sử dụng tên miền     │ Không                    │
+     │ IP server            │ 123.030.048.072          │
+     │ Số cổng Server       │ 7005  ← VPS port         │
+     │ Yêu cầu máy ch       │ Có                       │
+     └──────────────────────┴──────────────────────────┘
+
+  → Lưu → Tắt máy CC 10 giây → Bật lại
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ
+================================================================================
+
+  ─── Proxy chạy nhưng máy CC không kết nối được ───
+
+  Kiểm tra máy CC và PC cùng mạng LAN:
+    ping 192.168.1.225  (IP máy CC)
+
+  Kiểm tra port 7006 đang listen:
+    netstat -ano | findstr :7006
+
+  Kiểm tra firewall Windows đã mở chưa (Bước 2)
+
+  ─── Proxy báo "Connection refused to Mita Pro" ───
+
+  Mita Pro chưa chạy trên port 7005.
+  Kiểm tra: netstat -ano | findstr :7005
+  → Mở Mita Pro và bật ADMS port 7005
+
+  ─── Không thấy "MITA→DEVICE" trong log ───
+
+  Mita Pro kết nối được nhưng không gửi lại.
+  → Kiểm tra Mita Pro có đang ở đúng chế độ ADMS không
+
+  ─── Machine CC đang kết nối thẳng VPS, không vào proxy ───
+
+  Chắc chắn đã đổi port 7005 → 7006 và IP VPS → IP PC chưa?
+  Kiểm tra lại cài đặt máy CC.
+
+================================================================================
+  THÔNG TIN MẠNG (CẬP NHẬT NẾU THAY ĐỔI)
+================================================================================
+
+  IP PC của bạn (trong mạng LAN): 192.168.1.46
+  IP máy CC (Ronald Jack AI06F):  192.168.1.225
+  IP VPS:                         123.30.48.72
+
+  Port proxy (tạm):  7006
+  Port Mita Pro:     7005
+  Port VPS server:   7005
+
+================================================================================
