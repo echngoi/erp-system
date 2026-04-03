@@ -194,6 +194,11 @@ class ZKPushClientHandler:
             logger.info(f"[ZK-TCP] 💓 Heartbeat REGISTER from SN={packet.serial_number} "
                         f"seq={packet.send_seq} — sending echo ACK")
 
+            # Update device contact (write shared file every ~30s, not every 3s)
+            if not hasattr(self, '_last_contact_write') or (now - self._last_contact_write) > 30:
+                self._last_contact_write = now
+                await self._record_device_contact()
+
             ack = bytearray(16)
             ack[0:2] = b'\x5a\xa5'
             ack[2:4] = raw[2:4]

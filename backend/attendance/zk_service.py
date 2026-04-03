@@ -157,15 +157,47 @@ class ZKBinaryService:
 
 
 # ── ADMS Device Contact Tracking ──────────────────────────────────────────────
-# Module-level dict lưu thời điểm cuối máy chấm công gửi request
-# Key = serial number, Value = {last_seen, ip, sn}
+# Shared file-based registry so both TCP server process and Django web process
+# can read/write device status. In-memory dict is used as local cache.
 _adms_device_registry = {}
 
 ADMS_ONLINE_THRESHOLD = 120  # seconds — nếu không liên lạc > 120s → offline
 
+# Shared file path — /tmp is accessible by all processes in same container
+_ADMS_CONTACT_FILE = '/tmp/adms_device_registry.json'
 
 # Serial numbers to ignore (Docker healthcheck, test requests)
 _ADMS_IGNORED_SNS = {'healthcheck', 'TEST123', 'TEST', 'test'}
+
+
+def _save_registry_to_file():
+    """Write registry to shared file for cross-process access."""
+    try:
+        import json
+        data = {}
+        for sn, entry in _adms_device_registry.items():
+            data[sn] = {
+                'last_seen': entry['last_seen'].isoformat(),
+                'ip': entry.get('ip'),
+                'sn': entry.get('sn'),
+            }
+        with open(_ADMS_CONTACT_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception:
+        pass
+
+
+def _load_registry_from_file():
+    """Read registry from shared file (written by TCP server process)."""
+    try:
+        import json
+        with open(_ADMS_CONTACT_FILE, 'r') as f:
+            data = json.load(f)
+        for sn, entry in data.items():
+            entry['last_seen'] = datetime.fromisoformat(entry['last_seen'])
+            _adms_device_registry[sn] = entry
+    except Exception:
+        pass
 
 
 def adms_record_contact(sn, ip=None, devinfo=None):
@@ -181,10 +213,12 @@ def adms_record_contact(sn, ip=None, devinfo=None):
     if devinfo and isinstance(devinfo, dict):
         entry['devinfo'] = devinfo
     _adms_device_registry[sn] = entry
+    _save_registry_to_file()
 
 
 def adms_get_last_contact():
     """Lấy thông tin liên lạc gần nhất từ máy thật (bỏ qua healthcheck)."""
+    _load_registry_from_file()
     real_devices = {k: v for k, v in _adms_device_registry.items()
                     if k not in _ADMS_IGNORED_SNS}
     if not real_devices:

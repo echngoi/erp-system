@@ -234,7 +234,8 @@ SSH vào VPS rồi chạy:
   │  docker compose up -d --build backend                                   │
   │                                                                         │
   │  # 5. Kiểm tra log — phải thấy cả ZK Push và Daphne khởi động         │
-  │  docker compose logs backend --tail 20                                  │
+  │  docker compose logs backend --tail 20  
+    docker compose logs backend -f --tail 5                               │
   └─────────────────────────────────────────────────────────────────────────┘
 
   NẾU GIT PULL BÁO CONFLICT:
