@@ -308,26 +308,132 @@ SSH vào VPS rồi chạy:
 
 
 ================================================================================
-  XỬ LÝ SỰ CỐ SAU DEPLOY
+  KIỂM TRA ZK PUSH SERVER ĐÃ KHỞI ĐỘNG CHƯA (PORT 7005)
+  Cập nhật: 2026-04-03 — Đổi sang ADMS mode port 7005
 ================================================================================
 
-  Nếu KHÔNG thấy log kết nối sau 2 phút:
+  SSH vào VPS:
+    ssh root@123.30.48.72
+    cd /opt/erp
 
-  1) Test port 5005 từ máy tính cùng mạng LAN với máy CC:
-     PowerShell: Test-NetConnection 123.30.48.72 -Port 5005
-     → TcpTestSucceeded phải là: True
-     → Nếu False: ufw chưa mở port hoặc Docker chưa expose đúng
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 1: Kiểm tra ZK Push server có khởi động không
+  ─────────────────────────────────────────────────────────────────────────
 
-  2) Kiểm tra ZK Push server đang chạy trong container:
-     docker compose exec backend ss -tlnp | grep 5005
-     → Phải thấy: LISTEN 0.0.0.0:5005
+    docker compose logs backend | grep -i "zk-tcp\|ZK Push\|run_zk_push\|7005"
 
-  3) Xem log chi tiết:
+    → PHẢI thấy dòng:
+      [ZK-TCP] ★ Server listening on ('0.0.0.0', 7005)
+
+    → Nếu KHÔNG thấy dòng này → ZK Push server CHƯA khởi động
+      → Xem thêm log lỗi: docker compose logs backend | grep -i "error\|traceback"
+
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 2: Kiểm tra port 7005 đang listen trong container
+  ─────────────────────────────────────────────────────────────────────────
+
+    docker compose exec backend ss -tlnp | grep 7005
+
+    → Phải thấy: LISTEN 0.0.0.0:7005
+    → Nếu không → ZK Push server crash hoặc chưa start
+
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 3: Kiểm tra Docker port mapping
+  ─────────────────────────────────────────────────────────────────────────
+
+    docker compose ps
+
+    → Phải thấy backend có: 0.0.0.0:7005->7005/tcp
+    → Nếu vẫn thấy 5005 → cần rebuild:
+      docker compose up -d --build backend
+
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 4: Kiểm tra firewall đã mở port 7005
+  ─────────────────────────────────────────────────────────────────────────
+
+    ufw status | grep 7005
+
+    → Phải thấy: 7005/tcp   ALLOW   Anywhere
+    → Nếu chưa mở:
+      ufw allow 7005/tcp
+
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 5: Test port 7005 từ bên ngoài (trên PC cá nhân, PowerShell)
+  ─────────────────────────────────────────────────────────────────────────
+
+    Test-NetConnection 123.30.48.72 -Port 7005
+
+    → TcpTestSucceeded phải là: True
+    → Nếu False: firewall chặn hoặc Docker chưa expose đúng
+
+  ─────────────────────────────────────────────────────────────────────────
+  BƯỚC 6: Theo dõi log realtime chờ máy CC kết nối
+  ─────────────────────────────────────────────────────────────────────────
+
+    docker compose logs backend -f --tail 5
+
+    → Sau khi máy CC đã đổi sang port 7005, chờ 30-60 giây
+    → Phải thấy:
+      [ZK-TCP] ★ New connection from 113.160.150.125
+      [ZK-TCP] ★ Registration from SN=ZXRC13013923 ...
+      [ZK-TCP] Sending REGISTER ACK (16B): 5aa5...
+
+  ─────────────────────────────────────────────────────────────────────────
+  CẤU HÌNH MÁY CHẤM CÔNG (Ronald Jack AI06F)
+  ─────────────────────────────────────────────────────────────────────────
+
+    Menu → Cài đặt Mchủ:
+
+    ┌──────────────────────┬──────────────────────────┐
+    │ Sử dụng tên miền     │ Không                    │
+    │ IP server            │ 123.030.048.072          │
+    │ Số cổng Server       │ 7005  ← ADMS mode        │
+    │ Yêu cầu máy ch       │ Có                       │
+    └──────────────────────┴──────────────────────────┘
+
+    → Lưu → tắt nguồn máy CC 10 giây → bật lại
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ
+================================================================================
+
+  ─── ZK Push server không khởi động ───
+
+  1) Xem log lỗi chi tiết:
+     docker compose logs backend | grep -i "error\|exception\|traceback" | tail 20
+
+  2) Thử chạy lệnh thủ công trong container:
+     docker compose exec backend python manage.py run_zk_push --port 7005
+
+     → Nếu thấy lỗi import hoặc syntax → code có bug
+     → Gửi lỗi để sửa
+
+  ─── Port 7005 không listen ───
+
+  1) Kiểm tra entrypoint.sh có dòng run_zk_push --port 7005:
+     docker compose exec backend cat entrypoint.sh | grep 7005
+
+  2) Kiểm tra Dockerfile expose:
+     docker compose exec backend cat /proc/1/cmdline | tr '\0' ' '
+
+  ─── Máy CC kết nối nhưng không thấy Registration ───
+
+  1) Xem toàn bộ ZK-TCP log:
      docker compose logs backend | grep "ZK-TCP"
 
-  4) Nếu máy CC kết nối được (thấy log New connection) nhưng
-     không thấy Registration sau 10 giây:
-     → Có thể firmware dùng format packet khác
-     → Xem log hex dump và báo lại để phân tích tiếp
+  2) Nếu thấy "New connection" nhưng không thấy "Registration":
+     → Máy CC gửi data nhưng parse bị lỗi
+     → Gửi log hex dump để phân tích
+
+  ─── Test-NetConnection False (port không mở từ bên ngoài) ───
+
+  1) Kiểm tra firewall VPS:
+     ufw status numbered
+     ufw allow 7005/tcp
+
+  2) Kiểm tra Docker listen trên host:
+     ss -tlnp | grep 7005
+     → Phải thấy docker-proxy listen trên 0.0.0.0:7005
 
 ================================================================================

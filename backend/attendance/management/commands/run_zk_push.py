@@ -185,12 +185,12 @@ class ZKPushClientHandler:
         ack[0:2] = b'\x5a\xa5'           # Reversed magic (server→device)
         ack[2:4] = raw[2:4]              # Echo command (01 00 = REGISTER)
         ack[4] = (raw[4] + 2) & 0xFF     # Sequence + 2
-        ack[5:8] = raw[5:8]              # Echo session + proto_ver ("b1")
-        ack[8:12] = b'\x00\x00\x00\x00'  # Zeros
+        ack[5:8] = raw[5:8]              # Echo recv_seq + proto_ver ("b1")
+        ack[8:12] = raw[8:12]            # Echo session/comm-key bytes from client
         ack[12] = 0x32                    # ACK status code
         ack[13] = 0x01                    # Fixed
         ack[14] = sum(ack[0:14]) & 0xFF   # Checksum = sum(bytes[0..13]) % 256
-        ack[15] = 0x02                    # Footer
+        ack[15] = raw[15]                 # Echo footer/version byte from client (02 or 03)
 
         ack_bytes = bytes(ack)
         logger.info(f"[ZK-TCP] Sending REGISTER ACK (16B): {ack_bytes.hex()}")
