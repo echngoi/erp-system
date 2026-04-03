@@ -1,0 +1,217 @@
+================================================================================
+  HƯỚNG DẪN: TÌM PORT MÀ MITA PRO ĐANG LISTEN
+  Mục đích: Biết port để đổi máy CC trỏ vào PC và để cấu hình Wireshark filter
+================================================================================
+
+
+================================================================================
+  BƯỚC 1: MỞ CMD VỚI QUYỀN ADMIN
+================================================================================
+
+  CÁCH 1 (nhanh nhất):
+  → Nhấn phím Windows → gõ "cmd"
+  → Click chuột PHẢI vào "Command Prompt"
+  → Chọn "Run as administrator"
+  → Bấm "Yes" khi Windows hỏi
+
+  CÁCH 2:
+  → Nhấn Windows + X
+  → Chọn "Terminal (Admin)" hoặc "Command Prompt (Admin)"
+
+
+================================================================================
+  BƯỚC 2: MỞ MITA PRO TRƯỚC — PHẢI MỞ PHẦN MỀM TRƯỚC KHI CHECK PORT
+================================================================================
+
+  → Mở Mita Pro bình thường
+  → Chờ phần mềm load xong hoàn toàn (30-60 giây)
+  → ĐỂ PHẦN MỀM ĐANG MỞ, không tắt
+  → Rồi mới chạy các lệnh bên dưới
+
+
+================================================================================
+  BƯỚC 3: CHẠY LỆNH TÌM PORT
+================================================================================
+
+  Trong cửa sổ CMD (Admin), chạy từng lệnh sau:
+
+  ──────────────────────────────────────────────────────────────────────────
+  LỆNH 1: Tìm tất cả port đang LISTEN (lọc các port phổ biến cho máy CC)
+  ──────────────────────────────────────────────────────────────────────────
+
+    netstat -ano | findstr "LISTENING"
+
+  → Sẽ ra danh sách DÀI, ví dụ:
+    TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       1234
+    TCP    0.0.0.0:5005           0.0.0.0:0              LISTENING       5678
+    TCP    0.0.0.0:4370           0.0.0.0:0              LISTENING       5678
+
+  → Cột cuối là PID (Process ID) — ghi nhớ PID để dùng ở Bước 4
+
+  ──────────────────────────────────────────────────────────────────────────
+  LỆNH 2: Tìm riêng từng port phổ biến của phần mềm máy CC
+  ──────────────────────────────────────────────────────────────────────────
+
+  Chạy từng lệnh, xem cái nào có kết quả:
+
+    netstat -ano | findstr ":5005"
+    netstat -ano | findstr ":4370"
+    netstat -ano | findstr ":8088"
+    netstat -ano | findstr ":9090"
+    netstat -ano | findstr ":8080"
+    netstat -ano | findstr ":8000"
+    netstat -ano | findstr ":80"
+
+  → Nếu có kết quả dạng:
+    TCP    0.0.0.0:5005    0.0.0.0:0    LISTENING    5678
+    → Mita Pro đang listen trên port 5005, PID = 5678
+
+  → Nếu KHÔNG có kết quả → port đó không dùng, thử port khác
+
+  ──────────────────────────────────────────────────────────────────────────
+  LỆNH 3 (tổng hợp — chạy lệnh này nếu không tìm được ở trên)
+  ──────────────────────────────────────────────────────────────────────────
+
+    netstat -ano | findstr "LISTENING" | findstr /V ":135 " | findstr /V ":445 " | findstr /V ":49"
+
+  → Lọc bỏ các port hệ thống Windows (135, 445, 49xxx)
+  → Chỉ còn lại các port của ứng dụng cài thêm
+
+
+================================================================================
+  BƯỚC 4: XÁC NHẬN PORT THUỘC MITA PRO (KHÔNG PHẢI PROCESS KHÁC)
+================================================================================
+
+  Sau khi tìm thấy port và PID ở bước 3, xác nhận PID thuộc Mita Pro:
+
+  LỆNH:
+
+    tasklist | findstr <PID>
+
+  Ví dụ nếu PID = 5678:
+
+    tasklist | findstr "5678"
+
+  → Kết quả ví dụ:
+    MitaPro.exe        5678   Console   1   45,120 K
+
+  → Nếu thấy tên file .exe của Mita Pro → ĐÚNG, đây là port Mita Pro dùng
+  → Nếu thấy tên khác (svchost.exe, System, ...) → SAI port, tìm port khác
+
+  ──────────────────────────────────────────────────────────────────────────
+  HAY HƠN: Tìm thẳng từ tên process Mita Pro
+  ──────────────────────────────────────────────────────────────────────────
+
+  LỆNH 1 — Tìm PID của Mita Pro:
+
+    tasklist | findstr /I "mita"
+
+  → Kết quả ví dụ:
+    MitaPro.exe     5678    Console    1    45,120 K
+
+  → Ghi nhớ số 5678 (cột thứ 2, đó là PID)
+
+  LỆNH 2 — Tìm port mà PID đó đang listen:
+
+    netstat -ano | findstr "5678"
+
+  → Xem dòng có "LISTENING" → đó là port Mita Pro dùng
+
+  Ví dụ kết quả đầy đủ:
+    TCP    0.0.0.0:5005    0.0.0.0:0              LISTENING     5678
+    TCP    192.168.1.100:5005   113.160.x.x:50234  ESTABLISHED  5678
+
+  → Port 5005 đang LISTENING và có connection ESTABLISHED từ máy CC!
+
+
+================================================================================
+  BƯỚC 5: NẾU MITA PRO CÓ GIAO DIỆN CÀI ĐẶT — CHECK TRONG PHẦN MỀM
+================================================================================
+
+  Thường phần mềm quản lý CC có trang cài đặt push server.
+  Tìm trong menu Mita Pro:
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │ Tìm ở các chỗ sau trong Mita Pro:                                       │
+  │                                                                         │
+  │  → Cài đặt → Hệ thống → Cổng / Port                                   │
+  │  → Settings → Communication → Push Server Port                         │
+  │  → Thiết lập → Máy chủ → Số cổng                                      │
+  │  → System → Server Configuration                                       │
+  │  → Cài đặt kết nối → Cổng lắng nghe                                   │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  → Đây là cách nhanh nhất — xem trực tiếp trong UI không cần CMD
+
+
+================================================================================
+  BƯỚC 6: KHI ĐÃ BIẾT PORT — LÀM GÌ TIẾP
+================================================================================
+
+  Giả sử port Mita Pro = 5005 (hoặc bất kỳ port nào bạn tìm được)
+
+  A) ĐỔI MÁY CC TRỎ VÀO PC:
+  ─────────────────────────
+  Menu → Cài đặt Mchủ trên máy Ronald Jack AI06F:
+
+    IP server  = IP của PC (xem bằng lệnh: ipconfig → IPv4 Address)
+    Port       = <port Mita Pro>   ← ví dụ 5005
+    Yêu cầu máy ch = Có
+
+  Lưu → Tắt nguồn 10s → Bật lại
+
+  B) CẤU HÌNH WIRESHARK FILTER:
+  ──────────────────────────────
+  Mở Wireshark → trước khi Start, gõ vào ô Capture filter:
+
+    tcp port 5005
+
+  (thay 5005 bằng port thực)
+
+
+================================================================================
+  BẢNG PORT PHỔ BIẾN CỦA PHẦN MỀM QUẢN LÝ MÁY CC
+================================================================================
+
+  ┌──────────┬──────────────────────────────────────────────────────────────┐
+  │ Port     │ Phần mềm thường dùng                                        │
+  ├──────────┼──────────────────────────────────────────────────────────────┤
+  │ 5005     │ ZK Push Binary Protocol (Ronald Jack, ZKTeco)               │
+  │ 4370     │ ZKTeco SDK / ZKAccess (kết nối trực tiếp vào máy)          │
+  │ 8088     │ Một số phần mềm Việt Nam                                    │
+  │ 9090     │ Mita Pro / Wise Eye (có thể dùng)                          │
+  │ 8080     │ HTTP push server                                            │
+  │ 80       │ ADMS HTTP protocol                                          │
+  └──────────┴──────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  VÍ DỤ ĐẦY ĐỦ — OUTPUT THỰC TẾ KHI TÌM ĐÚNG PORT
+================================================================================
+
+  CMD> tasklist | findstr /I "mita"
+  MitaPro.exe              4892  Console                    1    87,316 K
+
+  CMD> netstat -ano | findstr "4892"
+  TCP    0.0.0.0:9090           0.0.0.0:0              LISTENING       4892
+  TCP    0.0.0.0:80             0.0.0.0:0              LISTENING       4892
+
+  → Mita Pro đang listen trên 2 port: 9090 và 80
+
+  → Đổi máy CC: IP=IP_PC, Port=9090 (hoặc 80)
+  → Wireshark filter: tcp port 9090
+
+
+================================================================================
+  GỬI KẾT QUẢ LẠI ĐỂ TÔI PHÂN TÍCH TIẾP
+================================================================================
+
+  Sau khi chạy các lệnh, chụp màn hình hoặc copy text kết quả của lệnh:
+
+    netstat -ano | findstr /I "mita"
+    netstat -ano | findstr "LISTENING"
+    tasklist | findstr /I "mita"
+
+  Gửi lại cho tôi → tôi xác nhận port đúng trước khi bạn đổi cấu hình máy CC.
+
+================================================================================

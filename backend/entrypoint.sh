@@ -19,8 +19,8 @@ python manage.py migrate --noinput
 echo "→ Collecting static files..."
 python manage.py collectstatic --noinput
 
-echo "→ Starting ZK Push TCP Server (port 5005)..."
-python manage.py run_zk_push --port 5005 &
+echo "→ Starting ZK Push TCP Server (port 7005)..."
+python manage.py run_zk_push --port 7005 &
 ZK_PID=$!
 echo "  ZK Push TCP Server started (PID=$ZK_PID)"
 

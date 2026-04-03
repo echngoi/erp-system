@@ -1,0 +1,434 @@
+================================================================================
+  HƯỚNG DẪN: BẮT TRAFFIC GIỮA MÁY CHẤM CÔNG VÀ PHẦN MỀM GỐC
+  Mục đích: Xem chính xác server trả lời gì khi máy CC đăng ký thành công
+  Máy CC: Ronald Jack AI06F (SN: ZXRC13013923)
+================================================================================
+
+
+  LÝ DO CẦN LÀM BƯỚC NÀY:
+  ─────────────────────────
+  Sau 8+ vòng thử nghiệm (78+ chiến lược), máy chấm công LUÔN từ chối
+  mọi phản hồi từ server tự xây. Giao thức A5 5A là proprietary, không
+  có tài liệu công khai. Cách DUY NHẤT để biết server phải trả lời gì:
+  → Cho máy CC kết nối vào phần mềm gốc, bắt traffic bằng Wireshark.
+
+
+================================================================================
+  TỔNG QUAN CÁC BƯỚC
+================================================================================
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  1. Cài Wireshark trên PC                                              │
+  │  2. Cài phần mềm quản lý Ronald Jack (WDMS / ZKAccess / Wise Eye)     │
+  │  3. Đảm bảo PC và máy CC cùng mạng LAN                                │
+  │  4. Đổi cấu hình máy CC → trỏ vào IP của PC                          │
+  │  5. Bật Wireshark capture trên PC                                       │
+  │  6. Bật phần mềm quản lý, chờ máy CC kết nối                          │
+  │  7. Xuất file capture (.pcap) gửi để phân tích                        │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+
+================================================================================
+  BƯỚC 1: CÀI WIRESHARK
+================================================================================
+
+  1. Tải Wireshark:
+     https://www.wireshark.org/download.html
+     → Chọn "Windows x64 Installer"
+
+  2. Cài đặt:
+     → Next → Next → QUAN TRỌNG: Tick cài "Npcap" khi được hỏi
+     → Npcap là driver bắt packet, BẮT BUỘC phải cài
+     → Finish
+
+  3. Khởi động lại PC sau khi cài (khuyến nghị)
+
+
+================================================================================
+  BƯỚC 2: CÀI PHẦN MỀM QUẢN LÝ MÁY CHẤM CÔNG
+================================================================================
+
+  Máy Ronald Jack AI06F thường đi kèm CD hoặc link tải phần mềm.
+  Tên phần mềm có thể là một trong các tên sau:
+
+  ┌──────────────────────┬─────────────────────────────────────────────────┐
+  │ Tên phần mềm         │ Ghi chú                                        │
+  ├──────────────────────┼─────────────────────────────────────────────────┤
+  │ WDMS                 │ Web-based Device Management System (phổ biến)  │
+  │ ZKBioAccess          │ Phiên bản mới của ZKTeco                       │
+  │ Wise Eye On 39       │ Phần mềm Việt Nam cho Ronald Jack              │
+  │ RJ Software          │ Phần mềm đi kèm máy                           │
+  │ ZKTime.Net 3.0       │ Phiên bản cũ                                   │
+  └──────────────────────┴─────────────────────────────────────────────────┘
+
+  CÁCH TÌM PHẦN MỀM:
+  (a) Xem trong CD/USB đi kèm máy khi mua
+  (b) Hỏi nhà cung cấp Ronald Jack yêu cầu gửi link tải
+  (c) Tìm: "Ronald Jack AI06F software download"
+  (d) Tìm: "WDMS download ZKTeco"
+
+  CÀI ĐẶT:
+  → Cài bình thường, chọn tất cả mặc định
+  → Nếu hỏi port: GIỮ NGUYÊN PORT MẶC ĐỊNH (thường là 5005 hoặc 4370)
+  → Ghi nhớ port mà phần mềm dùng (xem bước 4)
+
+
+================================================================================
+  BƯỚC 3: XÁC ĐỊNH PORT CỦA PHẦN MỀM
+================================================================================
+
+  Sau khi cài và mở phần mềm, cần tìm port mà nó đang lắng nghe.
+
+  CÁCH 1: Xem trong phần mềm
+  → Thường có trong: Settings → Communication → Push Server Port
+  → Hoặc: Cài đặt → Máy chủ → Cổng
+
+  CÁCH 2: Dùng CMD kiểm tra
+  Mở CMD (Admin) trên PC rồi chạy:
+
+    netstat -ano | findstr "LISTEN" | findstr "5005"
+    netstat -ano | findstr "LISTEN" | findstr "4370"
+    netstat -ano | findstr "LISTEN" | findstr "80"
+
+  → Tìm dòng có LISTENING → đó là port phần mềm đang dùng
+  → Ghi nhớ PORT này (ví dụ: 5005)
+
+
+================================================================================
+  BƯỚC 4: ĐẢM BẢO PC VÀ MÁY CC CÙNG MẠNG LAN
+================================================================================
+
+  ĐIỀU KIỆN BẮT BUỘC:
+  PC cài Wireshark và máy chấm công PHẢI cùng mạng nội bộ (LAN/WiFi).
+
+  KIỂM TRA IP CỦA PC:
+  Mở CMD trên PC, chạy:
+
+    ipconfig
+
+  → Tìm dòng "IPv4 Address": ví dụ 192.168.1.100
+  → Ghi nhớ IP này
+
+  KIỂM TRA KẾT NỐI:
+  Từ PC, ping IP máy CC (nếu biết IP nội bộ của máy CC):
+
+    ping 192.168.1.xxx
+
+  → Nếu Reply → OK, cùng mạng
+  → Nếu timeout → khác mạng, cần nối cùng switch/router
+
+  NẾU KHÔNG CÙNG MẠNG:
+  → Cắm dây mạng (LAN cable) từ máy CC vào cùng switch/router với PC
+  → Hoặc: dùng crossover cable nối trực tiếp PC ↔ máy CC
+     (đặt IP tĩnh: PC=192.168.1.100, máy CC=192.168.1.200, mask=255.255.255.0)
+
+
+================================================================================
+  BƯỚC 5: ĐỔI CẤU HÌNH MÁY CHẤM CÔNG → TRỎ VÀO PC
+================================================================================
+
+  Trên máy Ronald Jack AI06F:
+  Menu → Cài đặt Mchủ (hoặc Comm → Server Settings)
+
+  ĐỔI CÁC GIÁ TRỊ SAU:
+
+  ┌──────────────────────┬──────────────────────────────────────────────────┐
+  │ Cài đặt               │ Giá trị                                        │
+  ├──────────────────────┼──────────────────────────────────────────────────┤
+  │ Sử dụng tên miền     │ Không                                           │
+  │ IP server            │ IP của PC (ví dụ: 192.168.001.100)              │
+  │                       │ ← THAY BẰNG IP THỰC CỦA PC TỪ BƯỚC 4          │
+  │ Số cổng Server       │ Port phần mềm từ Bước 3 (thường 5005)          │
+  │ Yêu cầu máy ch       │ Có                                              │
+  └──────────────────────┴──────────────────────────────────────────────────┘
+
+  → Lưu → Tắt nguồn máy CC 10 giây → Bật lại
+
+  LƯU Ý QUAN TRỌNG:
+  IP trên máy CC phải nhập đúng format có số 0 đệm:
+    192.168.1.100  →  nhập:  192.168.001.100
+    10.0.0.5       →  nhập:  010.000.000.005
+
+
+================================================================================
+  BƯỚC 6: TẮT FIREWALL TRÊN PC (TẠM THỜI)
+================================================================================
+
+  Windows Firewall có thể chặn kết nối từ máy CC.
+  TẮT TẠM trong lúc capture:
+
+  Cách 1: Giao diện
+  → Windows Settings → Privacy & Security → Windows Security
+  → Firewall & network protection → Chọn mạng đang dùng (Private/Public)
+  → Tắt "Microsoft Defender Firewall"
+
+  Cách 2: CMD (Admin)
+    netsh advfirewall set allprofiles state off
+
+  ★ NHỚ BẬT LẠI SAU KHI CAPTURE XONG:
+    netsh advfirewall set allprofiles state on
+
+  HOẶC chỉ mở port cụ thể (an toàn hơn):
+    netsh advfirewall firewall add rule name="ZK Push" dir=in action=allow protocol=TCP localport=5005
+
+
+================================================================================
+  BƯỚC 7: BẮT ĐẦU CAPTURE BẰNG WIRESHARK
+================================================================================
+
+  THỨ TỰ THỰC HIỆN RẤT QUAN TRỌNG:
+  1) Mở Wireshark TRƯỚC
+  2) Mở phần mềm quản lý SAU
+  3) Bật máy CC CUỐI CÙNG
+
+  ─────────────────────────────────────────
+  A) MỞ WIRESHARK
+  ─────────────────────────────────────────
+
+  1. Chạy Wireshark (Run as Administrator để đảm bảo quyền capture)
+
+  2. Chọn network interface:
+     → Nhìn danh sách interfaces, chọn cái đang có traffic (có biểu đồ
+       sóng nhấp nhô)
+     → Thường là "Ethernet" hoặc "Wi-Fi"
+     → Nếu không chắc: mở CMD gõ "ipconfig", xem IP 192.168.x.x
+       thuộc adapter nào → chọn adapter đó
+
+  3. ĐẶT FILTER CAPTURE (rất quan trọng — giảm nhiễu):
+
+     Trước khi bấm Start, gõ vào ô "Capture filter":
+
+       tcp port 5005
+
+     (Thay 5005 bằng port thực của phần mềm nếu khác)
+
+     → Chỉ bắt traffic trên port 5005, bỏ qua tất cả traffic khác
+
+  4. Bấm nút ▶ (Start Capturing) hoặc nhấn biểu tượng cá mập xanh
+
+  ─────────────────────────────────────────
+  B) MỞ PHẦN MỀM QUẢN LÝ
+  ─────────────────────────────────────────
+
+  → Mở WDMS / Wise Eye / ZKTime
+  → Đảm bảo Push Service đang chạy (thường khởi động tự động)
+  → Kiểm tra: netstat -ano | findstr "5005" phải thấy LISTENING
+
+  ─────────────────────────────────────────
+  C) CHỜ MÁY CC KẾT NỐI
+  ─────────────────────────────────────────
+
+  → Bật máy CC (đã đổi IP server về PC từ Bước 5)
+  → Chờ 30-60 giây
+  → Trong Wireshark sẽ thấy packets xuất hiện:
+
+     Ví dụ:
+     ┌────┬──────────┬────────────────┬────────────────┬─────┬───────────────┐
+     │ No │ Time     │ Source         │ Destination    │Proto│ Info          │
+     ├────┼──────────┼────────────────┼────────────────┼─────┼───────────────┤
+     │  1 │ 0.000    │ 192.168.1.200  │ 192.168.1.100  │ TCP │ SYN           │
+     │  2 │ 0.001    │ 192.168.1.100  │ 192.168.1.200  │ TCP │ SYN,ACK       │
+     │  3 │ 0.050    │ 192.168.1.200  │ 192.168.1.100  │ TCP │ ACK           │
+     │  4 │ 0.100    │ 192.168.1.200  │ 192.168.1.100  │ TCP │ [PSH,ACK] ... │
+     │  5 │ 0.150    │ 192.168.1.100  │ 192.168.1.200  │ TCP │ [PSH,ACK] ... │
+     │  6 │ ...      │ tiếp tục ...   │                │     │               │
+     └────┴──────────┴────────────────┴────────────────┴─────┴───────────────┘
+
+     → Packet #4: Máy CC gửi REGISTER (48B, bắt đầu A5 5A)
+     → Packet #5: PHẦN MỀM TRẢ LỜI ← ĐÂY LÀ CÁI CHÚNG TA CẦN!
+
+
+================================================================================
+  BƯỚC 8: XEM DỮ LIỆU PACKET TRONG WIRESHARK
+================================================================================
+
+  SAU KHI THẤY TRAFFIC:
+
+  1. Bấm nút ■ (Stop) để dừng capture
+
+  2. Click vào packet phản hồi từ server (Source = IP PC, Destination = IP máy CC)
+
+  3. Ở panel dưới cùng, xem tab "Hex dump":
+     → Đây là dữ liệu thực mà server gửi cho máy CC
+     → Chụp màn hình hoặc copy hex dump
+
+  4. CÁCH XEM CHI TIẾT:
+     → Click phải vào packet → Follow → TCP Stream
+     → Sẽ hiện toàn bộ cuộc hội thoại giữa máy CC và server
+     → Chọn "Show data as: Hex Dump"
+     → Màu XANH = máy CC gửi (client)
+     → Màu ĐỎ = server trả lời ← CẦN CÁI NÀY
+
+  5. CHỤP MÀN HÌNH hoặc COPY NỘI DUNG:
+     → Trong cửa sổ TCP Stream, bấm "Save as..." → lưu file .txt
+     → Hoặc Ctrl+A → Ctrl+C → paste vào Notepad
+
+
+================================================================================
+  BƯỚC 9: LƯU FILE CAPTURE (.pcap)
+================================================================================
+
+  Trong Wireshark:
+  → File → Save As...
+  → Chọn nơi lưu, đặt tên: ronaldjack_ai06f_capture.pcapng
+  → Save
+
+  FILE NÀY CHỨA TOÀN BỘ TRAFFIC — GỬI CHO TÔI ĐỂ PHÂN TÍCH.
+
+
+================================================================================
+  BƯỚC 10: SAU KHI CAPTURE XONG — KHÔI PHỤC CẤU HÌNH
+================================================================================
+
+  1. ĐỔI LẠI MÁY CC TRỎ VỀ VPS:
+     Menu → Cài đặt Mchủ:
+     ┌──────────────────────┬──────────────────────────┐
+     │ IP server            │ 123.030.048.072          │
+     │ Số cổng Server       │ 5005                     │
+     │ Yêu cầu máy ch       │ Có                       │
+     └──────────────────────┴──────────────────────────┘
+
+  2. BẬT LẠI FIREWALL TRÊN PC:
+     netsh advfirewall set allprofiles state on
+
+  3. (Tùy chọn) Gỡ phần mềm quản lý nếu không cần nữa
+
+
+================================================================================
+  THÔNG TIN CẦN GỬI LẠI SAU KHI CAPTURE
+================================================================================
+
+  Gửi cho tôi MỘT TRONG CÁC CÁCH SAU (ưu tiên từ trên xuống):
+
+  ┌───┬─────────────────────────────────────────────────────────────────────┐
+  │ 1 │ File .pcapng (tốt nhất) — tôi phân tích được toàn bộ              │
+  ├───┼─────────────────────────────────────────────────────────────────────┤
+  │ 2 │ Screenshot của "Follow TCP Stream" (Hex Dump view)                 │
+  │   │ → Phải thấy cả phần XANH (client) và ĐỎ (server)                 │
+  ├───┼─────────────────────────────────────────────────────────────────────┤
+  │ 3 │ Copy text từ TCP Stream (Save as .txt)                             │
+  ├───┼─────────────────────────────────────────────────────────────────────┤
+  │ 4 │ Screenshot hex dump của packet server trả lời                      │
+  │   │ → Tối thiểu: số byte + hex content                                │
+  └───┴─────────────────────────────────────────────────────────────────────┘
+
+  THÔNG TIN BỔ SUNG NẾU CÓ:
+  - Tên và phiên bản phần mềm quản lý đã cài
+  - Port mà phần mềm sử dụng
+  - Máy CC có kết nối thành công không (phần mềm có hiện thiết bị online)
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ
+================================================================================
+
+  ─── MÁY CC KHÔNG KẾT NỐI VÀO PC ───
+
+  1. Kiểm tra IP đúng chưa:
+     → PC: ipconfig → ghi IP
+     → Máy CC: IP server phải = IP của PC (có số 0 đệm)
+
+  2. Kiểm tra port:
+     → netstat -ano | findstr "5005" phải thấy LISTENING
+     → Nếu không → phần mềm chưa bật hoặc dùng port khác
+
+  3. Kiểm tra firewall:
+     → Tắt tạm Windows Firewall (Bước 6)
+
+  4. Kiểm tra cùng mạng:
+     → Từ PC ping IP máy CC
+     → Nếu timeout → khác subnet, cần nối cùng switch
+
+  5. Thử kết nối thủ công từ PC khác:
+     PowerShell: Test-NetConnection <IP_PC> -Port 5005
+
+
+  ─── WIRESHARK KHÔNG THẤY TRAFFIC ───
+
+  1. Chọn đúng network interface → thử interface khác
+  2. Bỏ capture filter, bắt tất cả → lọc sau bằng display filter:
+     Display filter: tcp.port == 5005
+  3. Chạy Wireshark as Administrator
+
+
+  ─── PHẦN MỀM QUẢN LÝ KHÔNG CÀI ĐƯỢC ───
+
+  → Thử chạy installer as Administrator
+  → Tắt antivirus tạm thời (một số AV chặn WDMS)
+  → Thử phiên bản khác: WDMS, Wise Eye, ZKTime
+  → Nếu không cài được phần mềm: dùng PHƯƠNG ÁN B bên dưới
+
+
+================================================================================
+  PHƯƠNG ÁN B: NẾU KHÔNG CÀI ĐƯỢC PHẦN MỀM QUẢN LÝ
+================================================================================
+
+  Nếu không tìm/cài được phần mềm gốc, có thể dùng Wireshark +
+  một TCP server đơn giản trên PC để bắt traffic:
+
+  1. Cài Python trên PC: https://www.python.org/downloads/
+
+  2. Tạo file simple_tcp_logger.py trên PC:
+
+     ──────── simple_tcp_logger.py ────────
+     import socket, datetime
+
+     HOST = '0.0.0.0'
+     PORT = 5005
+
+     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+         s.bind((HOST, PORT))
+         s.listen(1)
+         print(f"Listening on {HOST}:{PORT}...")
+         while True:
+             conn, addr = s.accept()
+             print(f"\n{'='*60}")
+             print(f"Connection from {addr} at {datetime.datetime.now()}")
+             conn.settimeout(30)
+             try:
+                 while True:
+                     data = conn.recv(4096)
+                     if not data:
+                         print("Connection closed by client")
+                         break
+                     print(f"  Received {len(data)}B: {data.hex()}")
+                     print(f"  ASCII: {data}")
+                     # KHÔNG TRẢ LỜI — chỉ log
+             except socket.timeout:
+                 print("  Timeout (30s)")
+             except Exception as e:
+                 print(f"  Error: {e}")
+             finally:
+                 conn.close()
+     ──────── end ────────
+
+  3. Chạy: python simple_tcp_logger.py
+  4. Đổi máy CC trỏ vào IP PC, port 5005
+  5. Xem output → sẽ thấy hex dump của REGISTER packet từ máy CC
+  6. Kết hợp Wireshark capture để có đầy đủ TCP level detail
+
+  → Phương án này KHÔNG giúp xem server trả lời gì (vì không có server thật)
+  → Nhưng giúp xác nhận kết nối hoạt động và bắt được packet từ máy CC
+
+
+================================================================================
+  TÓM TẮT NHANH (CHECKLIST)
+================================================================================
+
+  □  Cài Wireshark + Npcap
+  □  Cài phần mềm quản lý Ronald Jack (WDMS / Wise Eye / ZKTime)
+  □  Xác nhận PC và máy CC cùng mạng LAN
+  □  Tìm port phần mềm đang listen (netstat)
+  □  Đổi máy CC: IP server → IP PC, port → port phần mềm
+  □  Tắt Windows Firewall (tạm)
+  □  Mở Wireshark → chọn interface → filter "tcp port 5005" → Start
+  □  Mở phần mềm quản lý
+  □  Bật máy CC → chờ 30-60s
+  □  Thấy traffic trong Wireshark → Stop → Follow TCP Stream
+  □  Lưu .pcapng + chụp screenshot TCP Stream
+  □  Đổi máy CC trỏ lại VPS (123.030.048.072:5005)
+  □  Bật lại Firewall
+  □  Gửi file .pcapng hoặc screenshot cho tôi
+
+================================================================================

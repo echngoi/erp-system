@@ -2,11 +2,11 @@
 ZK Push Binary TCP Server — Django Management Command
 =====================================================
 
-Runs an asyncio TCP server on port 5005 to receive ZK Push binary
-protocol data from Ronald Jack AI06F attendance machines.
+Runs an asyncio TCP server on port 7005 to receive ZK Push binary
+protocol data from Ronald Jack AI06F attendance machines (ADMS mode).
 
 Usage:
-    python manage.py run_zk_push [--port 5005] [--host 0.0.0.0]
+    python manage.py run_zk_push [--port 7005] [--host 0.0.0.0]
 
 The server:
   1. Accepts TCP connections from attendance machines
@@ -41,30 +41,6 @@ logger = logging.getLogger('attendance.zk_push')
 
 # Timeout: close connection if no data for this many seconds
 CLIENT_TIMEOUT = 300  # 5 minutes
-
-# ── REGISTER ACK strategy rotation ────────────────────────────────────────────
-# Device RSTs with basic "echo + change cmd + checksum" approach.
-# We try multiple strategies to discover what the device expects.
-# Device reconnects every ~30ms so all strategies are tested quickly.
-_register_strategy_counter = 0
-
-REGISTER_STRATEGIES = [
-    # ── ROUND 9: FINAL RADICAL ATTEMPTS ──
-    # After 68+ strategies: device reads exactly 16B, parses, ALWAYS rejects.
-    # SIZE_15B is the ONE never-tested critical size.
-    # KEEP_ALIVE observes if device sends other packets.
-    # Also try: Standard ZK payload format inside A5 5A, XOR checksum, comm key.
-    "SIZE_15B",          # 0: 15 bytes — CRITICAL untested gap (14B=timeout, 16B=parse+FIN)
-    "KEEP_ALIVE_30S",    # 1: Accept, stay silent 30s — watch for other packet types
-    "ZK_PAYLOAD_FMT",    # 2: 16B = A5 5A + standard ZK payload (cmd, chksum16, session, reply_num)
-    "XOR_CHECKSUM",      # 3: 16B with byte[14]=XOR(bytes[2:13]) instead of SUM
-    "ADD16_CHECKSUM",    # 4: 16B with 16-bit checksum at bytes[13-14] (standard ZK algorithm)
-    "COMMKEY_RESP",      # 5: 16B with bytes[8-11]=comm_key hash (default=0)
-    "CMD_0002_BE",       # 6: 16B with cmd in BIG endian (0x00 0x02) instead of LE (0x02 0x00)
-    "BYTE1_ONLY",        # 7: Send single byte 0x01 (bare minimum)
-    "HTTP_16B",          # 8: "HTTP/1.1 200 \r\n" — exactly 16 bytes ASCII
-    "NO_RESPONSE",       # 9: Control
-]
 
 
 class ZKPushClientHandler:
@@ -188,121 +164,36 @@ class ZKPushClientHandler:
             await self._handle_unknown(packet)
 
     async def _handle_register(self, packet):
-        """Handle device registration — try multiple ACK strategies."""
-        global _register_strategy_counter
+        """Handle REGISTER — send 16-byte reversed-magic ACK.
 
-        strategy_idx = _register_strategy_counter % len(REGISTER_STRATEGIES)
-        strategy = REGISTER_STRATEGIES[strategy_idx]
-        _register_strategy_counter += 1
-
+        Protocol reverse-engineered from Mita Pro 2024 ADMS capture:
+        Server responds with 16 bytes: magic reversed (5A A5), echo cmd,
+        sequence+2, echo session/proto, zeros, status 0x32, checksum.
+        """
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
                        f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
                        f"proto_ver={packet.proto_ver}")
         logger.info(f"[ZK-TCP] REGISTER raw ({len(packet.raw)}B): {packet.raw.hex()}")
-        logger.warning(f"[ZK-TCP] ▶ Strategy #{strategy_idx}: {strategy}")
 
         self.registered = True
         self.serial_number = packet.serial_number
         await self._record_device_contact()
 
-        # ── NO_RESPONSE: control — send nothing ──
-        if strategy == "NO_RESPONSE":
-            logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
-            return
-
-        # ── SIZE_15B: the ONE untested size (14B=timeout, 16B=parse+FIN) ──
-        if strategy == "SIZE_15B":
-            ack = bytearray(packet.raw[:15])
-            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
-            _apply_checksum(ack)
-            ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending SIZE_15B ({len(ack_bytes)}B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
-
-        # ── KEEP_ALIVE_30S: stay silent, observe if device sends other packets ──
-        if strategy == "KEEP_ALIVE_30S":
-            logger.warning(f"[ZK-TCP] KEEP_ALIVE_30S: staying silent for 30s, observing...")
-            # Don't send anything, just return to the main loop which will wait for more data
-            # The CLIENT_TIMEOUT is 300s, but device should timeout at ~10s
-            return
-
-        # ── BYTE1_ONLY: single byte ──
-        if strategy == "BYTE1_ONLY":
-            ack_bytes = b'\x01'
-            logger.info(f"[ZK-TCP] Sending BYTE1_ONLY (1B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
-
-        # ── HTTP_16B: exactly 16 bytes of HTTP text ──
-        if strategy == "HTTP_16B":
-            ack_bytes = b'HTTP/1.1 200 \r\n'  # exactly 16 bytes
-            logger.info(f"[ZK-TCP] Sending HTTP_16B (16B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
-
-        # ── All remaining strategies: 16B with different content/checksum ──
-        ack = bytearray(packet.raw[:16])
-        struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd=0x0002
-
-        if strategy == "ZK_PAYLOAD_FMT":
-            # Standard ZK payload format: [cmd16][checksum16][session16][reply_num16]
-            # Embed inside A5 5A 16B: magic(2) + payload(8) + padding(6)
-            # cmd=0x07D0(ACK_OK), chksum=TBD, session=0x0000, reply=0x0000
-            ack = bytearray(16)
-            ack[0:2] = b'\xa5\x5a'
-            struct.pack_into('<H', ack, 2, 0x07D0)  # ZK ACK_OK
-            # Standard ZK 16-bit checksum placeholder
-            ack[4:6] = b'\x00\x00'  # checksum placeholder
-            ack[6:8] = b'\x00\x00'  # session_id = 0
-            ack[8:10] = b'\x00\x00'  # reply_number = 0
-            ack[10:16] = b'\x00\x00\x00\x00\x00\x00'  # padding
-            # Compute standard ZK 16-bit checksum over "payload" (bytes 2-15, excl checksum at 4-5)
-            chk_32b = 0
-            payload_for_chk = bytearray(ack[2:16])
-            payload_for_chk[2:4] = b'\x00\x00'  # zero out checksum position
-            for i in range(0, len(payload_for_chk), 2):
-                num_16b = payload_for_chk[i] + (payload_for_chk[i+1] << 8) if i+1 < len(payload_for_chk) else payload_for_chk[i]
-                chk_32b += num_16b
-            chk_32b = (chk_32b & 0xffff) + ((chk_32b & 0xffff0000) >> 16)
-            chk_16b = chk_32b ^ 0xFFFF
-            struct.pack_into('<H', ack, 4, chk_16b)
-
-        elif strategy == "XOR_CHECKSUM":
-            # XOR instead of SUM for checksum at byte[14]
-            xor_val = 0
-            for b in ack[2:13]:
-                xor_val ^= b
-            ack[14] = xor_val & 0xFF
-
-        elif strategy == "ADD16_CHECKSUM":
-            # Standard ZK 16-bit checksum at bytes[13-14] (2-byte checksum)
-            # Compute over bytes[2:13] + bytes[15] (exclude checksum bytes 13-14)
-            chk_data = bytearray(ack[2:13]) + bytearray([ack[15]])
-            chk_32b = 0
-            if len(chk_data) % 2 == 1:
-                chk_data.append(0)
-            for i in range(0, len(chk_data), 2):
-                num_16b = chk_data[i] + (chk_data[i+1] << 8)
-                chk_32b += num_16b
-            chk_32b = (chk_32b & 0xffff) + ((chk_32b & 0xffff0000) >> 16)
-            chk_16b = chk_32b ^ 0xFFFF
-            struct.pack_into('<H', ack, 13, chk_16b)
-
-        elif strategy == "COMMKEY_RESP":
-            # Set session bytes[8-11] to comm_key response (default comm_key=0)
-            # In standard ZK, comm_key=0 → auth hash = specific value
-            struct.pack_into('<I', ack, 8, 0)  # comm_key hash for key=0
-            _apply_checksum(ack)
-
-        elif strategy == "CMD_0002_BE":
-            # Command in BIG endian: 0x00 0x02 instead of LE 0x02 0x00
-            ack[2] = 0x00
-            ack[3] = 0x02
-            _apply_checksum(ack)
+        # Build 16-byte ACK (reverse-engineered from Mita Pro ADMS on port 7005)
+        raw = packet.raw
+        ack = bytearray(16)
+        ack[0:2] = b'\x5a\xa5'           # Reversed magic (server→device)
+        ack[2:4] = raw[2:4]              # Echo command (01 00 = REGISTER)
+        ack[4] = (raw[4] + 2) & 0xFF     # Sequence + 2
+        ack[5:8] = raw[5:8]              # Echo session + proto_ver ("b1")
+        ack[8:12] = b'\x00\x00\x00\x00'  # Zeros
+        ack[12] = 0x32                    # ACK status code
+        ack[13] = 0x01                    # Fixed
+        ack[14] = sum(ack[0:14]) & 0xFF   # Checksum = sum(bytes[0..13]) % 256
+        ack[15] = 0x02                    # Footer
 
         ack_bytes = bytes(ack)
-        logger.info(f"[ZK-TCP] Sending 16B [{strategy}]: {ack_bytes.hex()}")
+        logger.info(f"[ZK-TCP] Sending REGISTER ACK (16B): {ack_bytes.hex()}")
         await self._send(ack_bytes)
 
     async def _handle_heartbeat(self, packet):
@@ -505,7 +396,7 @@ def _sync_save_attendance(records, sn):
 class ZKPushTCPServer:
     """asyncio TCP server for ZK Push binary protocol."""
 
-    def __init__(self, host='0.0.0.0', port=5005):
+    def __init__(self, host='0.0.0.0', port=7005):
         self.host = host
         self.port = port
         self.server = None
@@ -546,7 +437,7 @@ class Command(BaseCommand):
 
     def add_arguments(self, parser):
         parser.add_argument('--host', default='0.0.0.0', help='Bind address (default: 0.0.0.0)')
-        parser.add_argument('--port', type=int, default=5005, help='TCP port (default: 5005)')
+        parser.add_argument('--port', type=int, default=7005, help='TCP port (default: 7005)')
 
     def handle(self, *args, **options):
         host = options['host']
