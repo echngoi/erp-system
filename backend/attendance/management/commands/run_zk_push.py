@@ -49,15 +49,15 @@ CLIENT_TIMEOUT = 300  # 5 minutes
 _register_strategy_counter = 0
 
 REGISTER_STRATEGIES = [
-    "HTTP_200",          # 0: HTTP/1.1 200 OK (maybe device expects HTTP?)
-    "HTTP_ADMS",         # 1: Full ADMS handshake response
-    "SIZE_20B",          # 2: 20-byte A5 5A (header + 4 past SN start)
-    "SIZE_24B",          # 3: 24-byte A5 5A
-    "SIZE_28B",          # 4: 28-byte A5 5A
-    "SIZE_32B",          # 5: 32-byte A5 5A
-    "DIFF_MAGIC_48B",   # 6: 48B but magic = 5A A5 (reversed) — test magic parsing
-    "SESSION_NONZERO",  # 7: Full 48B with session bytes[8-11] = random non-zero
-    "HTTP_BIN_WRAP",    # 8: HTTP 200 with binary A5 5A body
+    "B67_0000",          # 0: bytes[6-7] = 0x00,0x00 instead of "b1" — NEVER TESTED
+    "B15_00",            # 1: byte[15] = 0x00 instead of 0x02 — NEVER TESTED
+    "B15_01",            # 2: byte[15] = 0x01 — NEVER TESTED
+    "MIRROR_CMD",        # 3: BOTH bytes[2-3] AND bytes[12-13] set to 0x0002
+    "FLAGS_ZERO",        # 4: bytes[12-13] = 0x0000
+    "COMBO_B67_B15",     # 5: bytes[6-7]=0, byte[15]=0, bytes[12-13]=0x0002
+    "SIZE_17B",          # 6: Exact 17 bytes — narrow RST boundary (16→FIN, 20→RST)
+    "SIZE_18B",          # 7: Exact 18 bytes
+    "B1213_SWAP",        # 8: bytes[12-13] = 0x0100 (swapped from 0x0001)
     "NO_RESPONSE",       # 9: Control — send nothing
 ]
 
@@ -205,55 +205,8 @@ class ZKPushClientHandler:
             logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
             return
 
-        # ── HTTP_200: plain HTTP 200 response ──
-        if strategy == "HTTP_200":
-            ack = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n"
-            logger.info(f"[ZK-TCP] Sending HTTP_200 ({len(ack)}B)")
-            await self._send(ack)
-            return
-
-        # ── HTTP_ADMS: full ADMS-style handshake response ──
-        if strategy == "HTTP_ADMS":
-            body = (
-                f"GET OPTION FROM: {packet.serial_number}\r\n"
-                f"Stamp=9999\r\n"
-                f"OpStamp=9999\r\n"
-                f"ErrorDelay=60\r\n"
-                f"Delay=30\r\n"
-                f"Realtime=1\r\n"
-                f"Encrypt=0\r\n"
-            )
-            ack = (
-                f"HTTP/1.1 200 OK\r\n"
-                f"Content-Type: text/plain\r\n"
-                f"Content-Length: {len(body)}\r\n"
-                f"\r\n"
-                f"{body}"
-            ).encode('utf-8')
-            logger.info(f"[ZK-TCP] Sending HTTP_ADMS ({len(ack)}B)")
-            await self._send(ack)
-            return
-
-        # ── HTTP_BIN_WRAP: HTTP 200 wrapping a binary A5 5A ACK in body ──
-        if strategy == "HTTP_BIN_WRAP":
-            bin_ack = bytearray(packet.raw)
-            struct.pack_into('<H', bin_ack, 2, CMD_REGISTER_ACK)
-            _apply_checksum(bin_ack)
-            bin_body = bytes(bin_ack)
-            header = (
-                f"HTTP/1.1 200 OK\r\n"
-                f"Content-Type: application/octet-stream\r\n"
-                f"Content-Length: {len(bin_body)}\r\n"
-                f"\r\n"
-            ).encode('utf-8')
-            ack = header + bin_body
-            logger.info(f"[ZK-TCP] Sending HTTP_BIN_WRAP ({len(ack)}B)")
-            await self._send(ack)
-            return
-
-        # ── SIZE_NNB: Truncated A5 5A packet to find RST size boundary ──
-        # Known: 16B → FIN, 36B → RST. Test 20, 24, 28, 32 to narrow.
-        size_map = {"SIZE_20B": 20, "SIZE_24B": 24, "SIZE_28B": 28, "SIZE_32B": 32}
+        # ── SIZE_17B / SIZE_18B: narrow RST boundary ──
+        size_map = {"SIZE_17B": 17, "SIZE_18B": 18}
         if strategy in size_map:
             target_size = size_map[strategy]
             ack = bytearray(packet.raw[:target_size])
@@ -264,29 +217,48 @@ class ZKPushClientHandler:
             await self._send(ack_bytes)
             return
 
-        # ── DIFF_MAGIC_48B: 48 bytes but magic reversed (5A A5) ──
-        # Tests: does device RST on ANY 48B, or only when magic is A5 5A?
-        if strategy == "DIFF_MAGIC_48B":
-            ack = bytearray(packet.raw)
-            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
-            _apply_checksum(ack)
-            ack[0] = 0x5a  # Reverse magic: 5A A5 instead of A5 5A
-            ack[1] = 0xa5
-            ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending DIFF_MAGIC_48B ({len(ack_bytes)}B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
+        # ── All remaining strategies: full 48B with specific field changes ──
+        ack = bytearray(packet.raw)
+        struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd = 0x0002
 
-        # ── SESSION_NONZERO: set bytes[8-11] to non-zero session ID ──
-        if strategy == "SESSION_NONZERO":
-            ack = bytearray(packet.raw)
-            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
-            # Assign a session: use counter as session_id
-            struct.pack_into('<I', ack, 8, 0x00010001)
-            _apply_checksum(ack)
-            ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending SESSION_NONZERO ({len(ack_bytes)}B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
+        if strategy == "B67_0000":
+            # Bytes 6-7 are "b1" (0x62 0x31) in device packet — NEVER varied before
+            ack[6] = 0x00
+            ack[7] = 0x00
+
+        elif strategy == "B15_00":
+            # Byte 15 is always 0x02 or 0x03 in device packet — NEVER varied
+            ack[15] = 0x00
+
+        elif strategy == "B15_01":
+            # Try byte 15 = 0x01
+            ack[15] = 0x01
+
+        elif strategy == "MIRROR_CMD":
+            # Change BOTH cmd fields: bytes[2-3]=0x0002 AND bytes[12-13]=0x0002
+            struct.pack_into('<H', ack, 12, 0x0002)
+
+        elif strategy == "FLAGS_ZERO":
+            # bytes[12-13] = 0x0000
+            ack[12] = 0x00
+            ack[13] = 0x00
+
+        elif strategy == "COMBO_B67_B15":
+            # Zero proto_ver + byte15 + change flags — all untouched fields at once
+            ack[6] = 0x00
+            ack[7] = 0x00
+            ack[15] = 0x00
+            struct.pack_into('<H', ack, 12, 0x0002)
+
+        elif strategy == "B1213_SWAP":
+            # bytes[12-13] = 0x0100 instead of 0x0001 (swap byte order)
+            ack[12] = 0x01
+            ack[13] = 0x00
+
+        _apply_checksum(ack)
+        ack_bytes = bytes(ack)
+        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack_bytes)}B) [{strategy}]: {ack_bytes.hex()}")
+        await self._send(ack_bytes)
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
