@@ -42,6 +42,16 @@ logger = logging.getLogger('attendance.zk_push')
 # Timeout: close connection if no data for this many seconds
 CLIENT_TIMEOUT = 300  # 5 minutes
 
+# ── Rate limiter for rapid-reconnect protection ───────────────────────────────
+# From Mita Pro capture: Connection #1 (probe) ALWAYS closes after ACK.
+# Connection #2 (3.5 sec later) stays connected. On WAN, device rapid-reconnects
+# every 30ms and gets stuck in probe mode forever. Fix: don't ACK rapid
+# reconnects, forcing device to slow down. Once gap > 2s, ACK normally.
+_device_last_ack_time = {}    # IP → timestamp of last ACK sent
+_device_rapid_count = {}      # IP → count of suppressed rapid reconnects
+
+RAPID_RECONNECT_THRESHOLD = 2.0  # seconds — below this = rapid reconnect
+
 
 class ZKPushClientHandler:
     """Handles a single TCP connection from an attendance machine."""
@@ -167,9 +177,37 @@ class ZKPushClientHandler:
         """Handle REGISTER — send 16-byte reversed-magic ACK.
 
         Protocol reverse-engineered from Mita Pro 2024 ADMS capture:
-        Server responds with 16 bytes: magic reversed (5A A5), echo cmd,
-        sequence+2, echo session/proto, zeros, status 0x32, checksum.
+        Connection #1 (probe) always closes after ACK — this is normal.
+        Connection #2 (after 3.5s gap) stays connected.
+        On WAN, device rapid-reconnects every 30ms and gets stuck in probe mode.
+        Fix: suppress ACK for rapid reconnects to force device to slow down.
         """
+        ip = self.addr[0] if self.addr else 'unknown'
+        now = time.time()
+        last_ack = _device_last_ack_time.get(ip, 0)
+        gap = now - last_ack
+
+        # Rate limiting: if device reconnects too fast, don't send ACK.
+        # Device will timeout, eventually slow to 3+ second intervals,
+        # then get ACK and stay connected (like Mita Pro connection #2).
+        if gap < RAPID_RECONNECT_THRESHOLD:
+            count = _device_rapid_count.get(ip, 0) + 1
+            _device_rapid_count[ip] = count
+            if count == 1 or count % 100 == 0:
+                logger.warning(f"[ZK-TCP] ⚡ Rapid reconnect #{count} from "
+                               f"SN={packet.serial_number} (gap={gap:.3f}s) "
+                               f"— suppressing ACK, waiting for device to settle")
+            return  # Don't send ACK — device will timeout and slow down
+
+        # Gap is sufficient — this should be a "real" connection (like Mita Pro connection #2)
+        rapid_count = _device_rapid_count.get(ip, 0)
+        if rapid_count > 0:
+            logger.warning(f"[ZK-TCP] ✓ Device {packet.serial_number} settled down "
+                           f"after {rapid_count} rapid reconnects (gap={gap:.1f}s)")
+            _device_rapid_count[ip] = 0
+
+        _device_last_ack_time[ip] = now
+
         logger.warning(f"[ZK-TCP] ★ Registration from SN={packet.serial_number} "
                        f"seq={packet.send_seq} recv_seq={packet.recv_seq} "
                        f"proto_ver={packet.proto_ver}")
