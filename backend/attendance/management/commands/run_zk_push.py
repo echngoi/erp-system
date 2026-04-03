@@ -192,13 +192,26 @@ class ZKPushClientHandler:
         if self.registered:
             _device_last_ack_time[ip] = now
 
-            # Log extra detail when session/flags differ from normal heartbeat
-            session_hex = raw[8:12].hex()
-            flags_hex = raw[12:16].hex()
-            if session_hex != '00000000' or raw[12] != 0x00:
-                logger.warning(f"[ZK-TCP] 📦 Non-standard heartbeat from SN={packet.serial_number} "
-                               f"seq={packet.send_seq} session={session_hex} flags={flags_hex} "
+            # Decode session and flags for event detection
+            session_val = struct.unpack_from('<I', raw, 8)[0]  # uint32 LE
+            byte12 = raw[12]
+            byte13 = raw[13]
+
+            # ── PUNCH EVENT: session != 0 means attendance event ──────────
+            # From proxy capture: Mita Pro session=0x1e when punch, VPS session=0x78
+            # session value = user_id who just punched (uint32 LE)
+            if session_val != 0:
+                logger.warning(f"[ZK-TCP] ★★ PUNCH EVENT from SN={packet.serial_number} "
+                               f"session=0x{session_val:X} ({session_val}) "
+                               f"byte12={byte12} byte13={byte13} "
                                f"raw={raw.hex()}")
+                # Save attendance record!
+                await self._handle_punch_event(packet.serial_number, session_val)
+
+            # ── DATA READY: byte12=0x01 means device has pending data ─────
+            elif byte12 == 0x01:
+                logger.warning(f"[ZK-TCP] 📦 Data-ready signal from SN={packet.serial_number} "
+                               f"seq={packet.send_seq} byte12={byte12} byte13={byte13}")
             else:
                 logger.info(f"[ZK-TCP] 💓 Heartbeat REGISTER from SN={packet.serial_number} "
                             f"seq={packet.send_seq} — sending echo ACK")
@@ -270,6 +283,42 @@ class ZKPushClientHandler:
         ack_bytes = bytes(ack)
         logger.info(f"[ZK-TCP] Sending REGISTER ACK (16B): {ack_bytes.hex()}")
         await self._send(ack_bytes)
+
+    async def _handle_punch_event(self, serial_number, session_val):
+        """Handle attendance punch event embedded in heartbeat REGISTER.
+
+        The device signals a new punch via session bytes != 0 in a heartbeat
+        REGISTER packet. session_val = user_id on the device (uint32 LE).
+
+        Verified from captures:
+        - Mita Pro proxy: session=0x1e (30) when user punched
+        - VPS logs: session=0x78 (120) when user punched
+        """
+        from attendance.zk_push_protocol import AttendanceRecord
+
+        ts = datetime.now()
+        user_id = str(session_val)
+
+        logger.warning(f"[ZK-TCP] ★ Saving punch: user_id={user_id} "
+                       f"time={ts.strftime('%Y-%m-%d %H:%M:%S')} "
+                       f"SN={serial_number}")
+
+        record = AttendanceRecord(
+            user_id=user_id,
+            timestamp=ts,
+            status=0,      # Check-in by default
+            punch=0,
+        )
+
+        saved, new_records = await self._save_attendance_records([record])
+
+        if new_records:
+            await self._notify_websocket(new_records)
+            logger.warning(f"[ZK-TCP] ✓ Punch saved and pushed to WebSocket! "
+                           f"user={user_id} saved={saved}")
+        else:
+            logger.warning(f"[ZK-TCP] Punch record: user={user_id} "
+                           f"saved={saved} (may be duplicate)")
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
