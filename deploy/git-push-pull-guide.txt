@@ -181,3 +181,153 @@ SSH vào VPS rồi chạy:
   → KHÔNG còn thấy SN=healthcheck trong log khi check device status
 
 ================================================================================
+
+
+================================================================================
+  PHẦN 5: DEPLOY ZK PUSH TCP SERVER (2026-04-03)
+  Fix: Máy CC Ronald Jack AI06F dùng ZK Binary Protocol, không phải ADMS HTTP
+================================================================================
+
+  Tóm tắt thay đổi:
+  - Thêm TCP server port 5005 nhận ZK binary protocol từ máy CC
+  - Máy CC cần đổi port từ 80 → 5005 trong cài đặt
+
+================================================================================
+  BƯỚC 1: PUSH CODE TỪ MÁY TÍNH CÁ NHÂN
+================================================================================
+
+  cd "d:\myproject\ERP (COPY)"
+  git add -A
+  git commit -m "Add ZK Push Binary TCP Server for Ronald Jack AI06F"
+  git push origin master
+
+  Các file đã thêm/sửa trong commit này:
+  ┌───────────────────────────────────────────────────────────────────────┬──────────────────────────────────────┐
+  │ File                                                                  │ Thay đổi                             │
+  ├───────────────────────────────────────────────────────────────────────┼──────────────────────────────────────┤
+  │ backend/attendance/zk_push_protocol.py                                │ MỚI — ZK binary packet parser        │
+  │ backend/attendance/management/commands/run_zk_push.py                 │ MỚI — asyncio TCP server             │
+  │ backend/entrypoint.sh                                                 │ Khởi động ZK Push server trước Daphne│
+  │ backend/Dockerfile                                                    │ EXPOSE 8000 5005                     │
+  │ docker-compose.yml                                                    │ ports: "5005:5005"                   │
+  └───────────────────────────────────────────────────────────────────────┴──────────────────────────────────────┘
+
+
+================================================================================
+  BƯỚC 2: PULL VÀ DEPLOY TRÊN VPS (5 LỆNH)
+================================================================================
+
+  SSH vào VPS:
+    ssh root@123.30.48.72
+
+  ┌─────────────────────────────────────────────────────────────────────────┐
+  │  # 1. Vào thư mục project                                               │
+  │  cd /opt/erp                                                            │
+  │                                                                         │
+  │  # 2. Pull code mới từ GitHub                                           │
+  │  git pull origin master                                                 │
+  │                                                                         │
+  │  # 3. Mở port 5005 trên firewall VPS                                   │
+  │  ufw allow 5005/tcp                                                     │
+  │                                                                         │
+  │  # 4. Rebuild và khởi động lại backend                                 │
+  │  docker compose up -d --build backend                                   │
+  │                                                                         │
+  │  # 5. Kiểm tra log — phải thấy cả ZK Push và Daphne khởi động         │
+  │  docker compose logs backend --tail 20                                  │
+  └─────────────────────────────────────────────────────────────────────────┘
+
+  NẾU GIT PULL BÁO CONFLICT:
+    git stash
+    git pull origin master
+    git stash pop
+    docker compose up -d --build backend
+
+
+================================================================================
+  BƯỚC 3: XÁC NHẬN HAI SERVER ĐÃ CHẠY
+================================================================================
+
+  Trong kết quả của lệnh 5 (docker compose logs backend --tail 20),
+  PHẢI thấy ĐỦ CẢ HAI dòng sau:
+
+    → ZK Push TCP Server listening on ('0.0.0.0', 5005)
+    → Starting Daphne...
+    Listening on TCP address 0.0.0.0:8000
+
+  Nếu thiếu dòng đầu → ZK server không khởi động được, xem log lỗi.
+  Nếu thiếu dòng sau → Daphne không khởi động, xem log lỗi.
+
+  Kiểm tra thêm:
+    # Port 5005 đang listen
+    ss -tlnp | grep 5005
+
+    # Docker port mapping đúng chưa
+    docker compose ps
+    → backend: 0.0.0.0:5005->5005/tcp, 127.0.0.1:8000->8000/tcp
+
+    # Firewall đã mở
+    ufw status | grep 5005
+    → 5005/tcp   ALLOW   Anywhere
+
+
+================================================================================
+  BƯỚC 4: ĐỔI CẤU HÌNH TRÊN MÁY CHẤM CÔNG
+================================================================================
+
+  Trên máy Ronald Jack AI06F: Menu → Cài đặt Mchủ
+
+    ┌──────────────────────┬──────────────────────────┐
+    │ Sử dụng tên miền     │ Không                    │
+    │ IP server            │ 123.030.048.072          │
+    │ Số cổng Server       │ 5005  ← ĐỔI TỪ 80→5005  │
+    │ Yêu cầu máy ch       │ Có                       │
+    └──────────────────────┴──────────────────────────┘
+
+  → Lưu → tắt nguồn máy CC 10 giây → bật lại
+
+
+================================================================================
+  BƯỚC 5: KIỂM TRA KẾT NỐI MÁY CC → VPS
+================================================================================
+
+  Trên VPS, theo dõi log realtime:
+    docker compose logs backend -f --tail 10
+
+  Sau khi máy CC bật lại (30-60 giây), phải thấy:
+
+    [ZK-TCP] ★ New connection from 113.160.150.125
+    [ZK-TCP] ★ Registration from SN=ZXRC13013923 seq=... proto=b'kb1'
+    [ZK-TCP] Sending REGISTER_ACK: a55a0200...
+
+  Khi chấm công:
+    [ZK-TCP] ★ ATTLOG from SN=ZXRC13013923 payload=...B
+    [ZK-TCP] Saved: user=1 ts=2026-04-03 08:05:33 punch=0
+
+  → Sau đó kiểm tra trên web: https://hrmgo.site → Chấm công → Live Monitor
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ SAU DEPLOY
+================================================================================
+
+  Nếu KHÔNG thấy log kết nối sau 2 phút:
+
+  1) Test port 5005 từ máy tính cùng mạng LAN với máy CC:
+     PowerShell: Test-NetConnection 123.30.48.72 -Port 5005
+     → TcpTestSucceeded phải là: True
+     → Nếu False: ufw chưa mở port hoặc Docker chưa expose đúng
+
+  2) Kiểm tra ZK Push server đang chạy trong container:
+     docker compose exec backend ss -tlnp | grep 5005
+     → Phải thấy: LISTEN 0.0.0.0:5005
+
+  3) Xem log chi tiết:
+     docker compose logs backend | grep "ZK-TCP"
+
+  4) Nếu máy CC kết nối được (thấy log New connection) nhưng
+     không thấy Registration sau 10 giây:
+     → Có thể firmware dùng format packet khác
+     → Xem log hex dump và báo lại để phân tích tiếp
+
+================================================================================

@@ -32,7 +32,7 @@
 
 SSH vào VPS:
      ssh root@123.30.48.72
-     cd /root/erp-system
+     cd /opt/erp
 
 1.1. Kiểm tra backend đang chạy:
      docker compose ps
@@ -391,11 +391,365 @@ Nguyên nhân:
   Sau khi deploy code mới, trang web sẽ hiện đúng trạng thái:
   "Đang chờ máy chấm công kết nối" cho đến khi máy CC thật gửi request.
 
-  Để deploy fix:
-  1. Push code lên GitHub
-  2. Trên VPS: cd /root/erp-system && git pull
-  3. docker compose up -d --build backend
-  4. Refresh trang Device Settings → phải hiện "Đang chờ kết nối"
+  BƯỚC DEPLOY FIX TRÊN VPS (chạy trên SSH):
+  cd /opt/erp
+  git pull origin master
+  docker compose up -d --build backend
+  docker compose logs backend --tail 20
+
+  Sau đó refresh trang Device Settings → phải hiện "Đang chờ kết nối"
+
+─── SỰ CỐ 0B: Sau khi fix healthcheck, máy chấm công thật vẫn chưa kết nối ───
+
+TIẾN ĐỘ ĐÃ HOÀN THÀNH (cập nhật 2026-04-03):
+
+  ✅ VPS đã pull code fix (commit f8fac0f là HEAD)
+  ✅ Endpoint iclock hoạt động đúng:
+       curl http://api.hrmgo.site/iclock/cdata?SN=TEST999
+       → Trả về HTTP 200, text/plain, Stamp=0, Realtime=1, TimeZone=7...
+  ✅ Fix healthcheck đã có hiệu lực:
+       Web không còn hiện SN=healthcheck giả nữa
+       (SN=TEST999 trong web là do lệnh curl test từ VPS, không phải máy CC thật)
+  ✅ Nginx version 1.29.7 đang chạy, port 80 mở ra internet
+  ✅ WebSocket hoạt động (Live Monitor kết nối thành công)
+
+  ❌ Máy chấm công Ronald Jack AI06F CHƯA kết nối lần nào
+       IP 172.18.0.6 = Docker bridge network của VPS (không phải máy CC)
+       Chưa thấy SN thật của máy CC trong bất kỳ log nào
+
+NGUYÊN NHÂN VÀ HƯỚNG XỬ LÝ TIẾP THEO:
+
+  Có 3 khả năng chính tại sao máy CC chưa kết nối:
+
+  KHẢ NĂNG 1 — Máy CC chưa lưu/áp dụng cấu hình mới (khả năng cao nhất):
+  ──────────────────────────────────────────────────────────────────────────
+    Sau khi đổi "Tên miền" và "Số cổng Server" trên máy CC,
+    máy cần được khởi động lại để áp dụng.
+
+    Làm ngay:
+    a) Vào máy CC → Menu → Cài đặt Mchủ → xác nhận đúng:
+         Sử dụng tên miền: Có
+         Tên miền: api.hrmgo.site
+         Số cổng Server: 80
+    b) Tắt nguồn máy CC → đợi 10 giây → bật lại
+    c) Trên VPS: docker compose logs backend -f --tail 20
+    d) Đợi 60 giây sau khi máy CC bật
+    e) Phải thấy log: [iclock] Handshake từ SN=<SN_THẬT_CỦA_MÁY>
+
+  KHẢ NĂNG 2 — Mạng của máy CC không resolve được domain:
+  ──────────────────────────────────────────────────────────
+    Máy CC cần DNS để biết api.hrmgo.site = 123.30.48.72.
+
+    Test từ máy tính cùng mạng LAN với máy CC (CMD Windows):
+    nslookup api.hrmgo.site
+    → Phải trả về: 123.30.48.72
+
+    Nếu không resolve được:
+    a) Cấu hình DNS trên máy CC: Menu → Comm. → Ethernet → DNS = 8.8.8.8
+    b) Hoặc dùng IP trực tiếp thay domain (xem KHẢ NĂNG 3)
+
+  KHẢ NĂNG 3 — Dùng IP trực tiếp thay domain (phương án dự phòng):
+  ──────────────────────────────────────────────────────────────────
+    Nếu máy CC không resolve được domain → dùng IP 123.30.48.72.
+
+    Trên máy CC:
+      Sử dụng tên miền: Không
+      IP server: 123.030.048.072
+      Số cổng Server: 80
+
+    Trên VPS (thêm IP vào ALLOWED_HOSTS):
+      nano backend/.env.production
+      → Sửa dòng ALLOWED_HOSTS thành:
+        ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site,123.30.48.72
+      → Ctrl+O, Enter, Ctrl+X
+      → docker compose up -d --build backend
+
+LỆNH THEO DÕI LOG LIVE:
+
+  Chạy lệnh này trên VPS, giữ nguyên terminal, rồi bật/tắt máy CC:
+
+  docker compose logs backend -f --tail 5
+
+  Khi máy CC kết nối thành công sẽ thấy:
+  [iclock] Handshake từ SN=XXXXXX, pushver=2.4.1, options=
+  (XXXXXX là số Serial thật của máy CC, KHÔNG phải healthcheck hay TEST999)
+
+  Sau khi thấy handshake, chấm công thử:
+  [iclock] POST SN=XXXXXX, table=ATTLOG, ...
+  [iclock] ATTLOG saved: user_id=1, ts=...
+
+  → Nếu thấy 2 dòng trên: HOÀN TẤT! Máy CC đang đẩy data lên VPS.
+
+KIỂM TRA THEO THỨ TỰ:
+
+  KIỂM TRA 1 — Xác nhận VPS đã pull code mới (SSH vào VPS):
+
+    LƯU Ý: Thư mục project trên VPS là /opt/erp (KHÔNG phải /root/erp-system)
+
+    cd /opt/erp
+    git log --oneline -3
+
+    → Phải thấy commit mới nhất có nội dung:
+      "Fix healthcheck device registry, fix port display, update guides"
+
+    Nếu chưa thấy → chạy lệnh pull (xem FIX GIT CONFLICT bên dưới nếu bị lỗi):
+    git pull origin master
+    docker compose up -d --build backend
+
+  ═══ FIX LỖI KHI GIT PULL BÁO CONFLICT ═══
+
+  Lỗi thường gặp:
+    error: Your local changes to the following files would be overwritten by merge:
+            deploy/nginx.conf
+    Please commit your changes or stash them before you merge.
+    Aborting
+
+  Nguyên nhân:
+    File deploy/nginx.conf trên VPS đã được chỉnh sửa trực tiếp
+    (nano/vi trên VPS) mà chưa commit lên GitHub.
+    Git không cho phép pull vì sẽ overwrite thay đổi đó.
+
+  CÁCH FIX AN TOÀN (giữ nguyên nginx.conf đang chạy):
+
+    Bước 1 — Stash (cất tạm) file đang có conflict:
+    git stash
+
+    Bước 2 — Pull code mới từ GitHub:
+    git pull origin master
+
+    Bước 3 — Khôi phục lại nginx.conf từ stash (giữ bản VPS):
+    git stash pop
+
+    Nếu bước 3 báo conflict tiếp:
+    git checkout --theirs deploy/nginx.conf
+    git add deploy/nginx.conf
+
+    Bước 4 — Rebuild backend (nginx không cần rebuild):
+    docker compose up -d --build backend
+    docker compose restart nginx
+    docker compose ps
+
+  CÁCH FIX NHANH (dùng hẳn bản trên GitHub, bỏ qua bản VPS):
+
+    CẢNH BÁO: Lệnh này XÓA TOÀN BỘ thay đổi local trên VPS.
+    Chỉ dùng nếu chắc chắn bản GitHub là đúng.
+
+    git fetch origin
+    git reset --hard origin/master
+    docker compose up -d --build backend
+    docker compose restart nginx
+    docker compose ps
+
+  SAU KHI PULL THÀNH CÔNG — kiểm tra:
+
+    git log --oneline -3
+    → Dòng đầu phải có: "Fix healthcheck device registry..."
+
+    docker compose logs backend --tail 20
+    → KHÔNG còn thấy SN=healthcheck tạo ra "connected" giả
+
+  KIỂM TRA 2 — Xác nhận endpoint iclock hoạt động từ internet (VPS):
+
+    curl -v "http://api.hrmgo.site/iclock/cdata?SN=TEST999"
+
+    → Phải trả về text (Stamp=0, Realtime=1...)
+    → Nếu OK: server sẵn sàng nhận từ máy CC
+
+  KIỂM TRA 3 — Xác nhận máy CC đã đổi cấu hình chưa:
+
+    Vào máy CC: Menu → Cài đặt Mchủ
+    Phải thấy đúng:
+    ┌──────────────────────┬──────────────────┐
+    │ Sử dụng tên miền     │ Có               │
+    │ Tên miền             │ api.hrmgo.site   │
+    │ Số cổng Server       │ 80               │
+    └──────────────────────┴──────────────────┘
+
+    Nếu vẫn còn www.yunatt.com hoặc 192.168.1.xxx → chưa đổi, đổi lại ngay.
+
+  KIỂM TRA 4 — DNS từ mạng LAN của máy CC:
+
+    Từ máy TÍNH trên cùng mạng LAN với máy CC:
+    nslookup api.hrmgo.site
+
+    → Phải trả về: 123.30.48.72
+    → Nếu không resolve hoặc trả về IP khác:
+      - Router chưa có DNS server tốt
+      - Cấu hình DNS trên máy CC thành 8.8.8.8 trực tiếp
+
+  KIỂM TRA 5 — Kết nối HTTP từ mạng LAN tới VPS:
+
+    Từ máy TÍNH trên cùng mạng LAN với máy CC:
+
+    (CMD Windows)
+    curl http://api.hrmgo.site/iclock/cdata?SN=LANTEST
+
+    → Phải trả về text (Stamp=0, Realtime=1...)
+    → Nếu OK: mạng LAN đã thông tới VPS → máy CC phải kết nối được
+    → Nếu timeout/refused: ISP hoặc router chặn port 80 outbound
+
+  KIỂM TRA 6 — Theo dõi log VPS live khi test từ LAN:
+
+    Trên VPS: docker compose logs backend -f --tail 10
+
+    Đồng thời trên máy tính LAN:
+    curl "http://api.hrmgo.site/iclock/cdata?SN=LANTEST"
+
+    → Log VPS phải hiện: [iclock] Handshake từ SN=LANTEST
+    → Sau đó tắt máy CC rồi bật lại, đợi 60s xem có SN thật xuất hiện không
+
+  KIỂM TRA 7 — Port 80 VPS mở từ internet:
+
+    Trên VPS:
+    ufw status
+
+    Phải có dòng:
+    80/tcp   ALLOW   Anywhere
+    80/tcp (v6)   ALLOW   Anywhere (v6)
+
+    Nếu không có:
+    ufw allow 80/tcp
+    ufw reload
+
+─── SỰ CỐ 0C: Test kết nối mạng LAN → VPS từ máy tính Windows ───
+
+  Mục đích: Xác nhận mạng LAN nơi đặt máy CC có thể kết nối tới VPS.
+  Nếu từ máy tính LAN kết nối được → máy CC cũng sẽ kết nối được.
+  Nếu từ máy tính LAN KHÔNG kết nối được → vấn đề nằm ở mạng/router/ISP.
+
+  ĐIỀU KIỆN: Máy tính Windows phải nằm trên CÙNG MẠNG LAN với máy CC.
+  (Ví dụ: cùng cắm vào 1 switch/router, cùng dải IP 192.168.1.xxx)
+
+  ═══ BƯỚC 1: Kiểm tra DNS — máy CC có tìm được địa chỉ VPS không ═══
+
+  Mở CMD (Windows + R → gõ cmd → Enter), chạy lần lượt:
+
+  1a) Kiểm tra DNS resolve:
+      nslookup api.hrmgo.site
+
+      Kết quả ĐÚNG phải có dòng:
+          Address:  123.30.48.72
+
+      Kết quả SAI (fail):
+          *** api.hrmgo.site: No response from server
+          hoặc trả về IP khác / không phải 123.30.48.72
+
+      Nếu fail → DNS của mạng LAN chưa giải được domain:
+      → Thử lại với DNS server khác:
+          nslookup api.hrmgo.site 8.8.8.8
+          (Dùng Google DNS 8.8.8.8 để resolve)
+      → Nếu lần này trả về 123.30.48.72: DNS router bị lỗi
+         → Cấu hình DNS trên máy CC thành 8.8.8.8:
+            Menu → Comm. → Ethernet → DNS = 8.8.8.8
+
+  1b) Nếu dùng IP thay domain (PHƯƠNG ÁN DỰ PHÒNG):
+      Bỏ qua BƯỚC 1, dùng IP trực tiếp trong BƯỚC 2.
+
+  ═══ BƯỚC 2: Kiểm tra HTTP — máy tính có gọi được VPS không ═══
+
+  Vẫn trong CMD Windows:
+
+  2a) Test qua domain:
+      curl http://api.hrmgo.site/iclock/cdata?SN=LANTEST
+
+      Kết quả ĐÚNG:
+          GET OPTION FROM: LANTEST
+          Stamp=0
+          Realtime=1
+          TimeZone=7
+          ...
+
+      Kết quả SAI:
+          curl: (6) Could not resolve host    → DNS lỗi (xem BƯỚC 1)
+          curl: (7) Failed to connect         → Port 80 bị chặn
+          curl: (28) Operation timed out      → Mạng bị tường lửa chặn
+
+  2b) Test qua IP trực tiếp (nếu domain không được):
+      curl http://123.30.48.72/iclock/cdata?SN=LANTEST
+
+      Kết quả ĐÚNG: (giống trên — Stamp=0, Realtime=1...)
+      Kết quả SAI: → Port 80 của VPS bị chặn từ phía internet
+
+  LƯU Ý: Nếu curl chưa cài trên máy Windows:
+    - Windows 10/11 đã có sẵn curl trong CMD, thử chạy ngay.
+    - Nếu không có, tải tại: https://curl.se/windows/ hoặc dùng PowerShell:
+      Invoke-WebRequest "http://api.hrmgo.site/iclock/cdata?SN=LANTEST"
+
+  ═══ BƯỚC 3: Kiểm tra log VPS đồng thời với test từ LAN ═══
+
+  Mở 2 cửa sổ song song:
+
+  Cửa sổ 1 — SSH vào VPS, chạy:
+      ssh root@123.30.48.72
+      cd /opt/erp
+      docker compose logs backend -f --tail 5
+
+  Cửa sổ 2 — CMD Windows trên máy tính LAN, chạy:
+      curl http://api.hrmgo.site/iclock/cdata?SN=LANTEST
+
+  Kết quả cần thấy trong log VPS (cửa sổ 1):
+      [iclock] Handshake từ SN=LANTEST
+
+  → Nếu thấy: mạng LAN → VPS đang thông, máy CC phải kết nối được.
+    Vấn đề còn lại chỉ là cấu hình trên máy CC (port, domain, restart).
+
+  → Nếu KHÔNG thấy dòng log dù curl thành công:
+    Kiểm tra ALLOWED_HOSTS trên VPS (xem BƯỚC 4).
+
+  ═══ BƯỚC 4: Nếu dùng IP — thêm IP vào ALLOWED_HOSTS trên VPS ═══
+
+  Khi máy CC dùng IP 123.30.48.72 (thay vì domain), Django cần biết
+  IP này được phép gửi request (ALLOWED_HOSTS).
+
+  SSH vào VPS:
+      cd /opt/erp
+      nano backend/.env.production
+
+  Tìm dòng ALLOWED_HOSTS, sửa thành:
+      ALLOWED_HOSTS=api.hrmgo.site,hrmgo.site,www.hrmgo.site,123.30.48.72
+
+  Lưu: Ctrl+O → Enter → Ctrl+X
+
+  Rebuild backend:
+      docker compose up -d --build backend
+
+  Đợi 30 giây rồi test lại:
+      curl http://123.30.48.72/iclock/cdata?SN=IPTEST
+
+  → Phải trả về text (Stamp=0, Realtime=1...)
+
+  ═══ BƯỚC 5: Cấu hình máy CC dùng IP (nếu domain không resolve được) ═══
+
+  Trên máy CC: Menu → Cài đặt Mchủ
+
+      ┌──────────────────────┬────────────────────┐
+      │ Sử dụng tên miền     │ Không              │
+      │ IP server            │ 123.030.048.072    │
+      │ Số cổng Server       │ 80                 │
+      └──────────────────────┴────────────────────┘
+
+  LƯU Ý: Nhập IP theo định dạng 3 chữ số mỗi octet: 123.030.048.072
+  (một số firmware Ronald Jack yêu cầu đủ 3 chữ số)
+
+  Sau khi lưu → tắt nguồn máy CC 10 giây → bật lại.
+  Theo dõi log VPS: docker compose logs backend -f --tail 5
+  Đợi 60 giây → phải thấy: [iclock] Handshake từ SN=<SN_THẬT>
+
+  ═══ BẢNG TÓM TẮT KẾT QUẢ TEST ═══
+
+  ┌─────────────────────────────────────┬──────────────────────────────────────────┐
+  │ Kết quả test                        │ Hành động tiếp theo                      │
+  ├─────────────────────────────────────┼──────────────────────────────────────────┤
+  │ nslookup OK + curl domain OK        │ Cấu hình máy CC dùng domain, restart CC  │
+  │ nslookup FAIL + curl IP OK          │ Cấu hình máy CC dùng IP, thêm ALLOWED_  │
+  │                                     │ HOSTS, restart CC                        │
+  │ curl IP timeout/refused             │ ISP/router chặn port 80 outbound         │
+  │                                     │ → Liên hệ admin mạng, hoặc đổi port VPS │
+  │ curl OK, log VPS không thấy gì      │ ALLOWED_HOSTS thiếu IP, thêm vào và     │
+  │                                     │ rebuild backend                          │
+  │ Log VPS thấy LANTEST nhưng          │ Máy CC chưa restart / cấu hình sai      │
+  │ CC không kết nối                    │ → Kiểm tra lại menu máy CC, restart CC   │
+  └─────────────────────────────────────┴──────────────────────────────────────────┘
 
 ─── SỰ CỐ A: Máy CC không kết nối, không thấy log handshake ───
 
@@ -600,3 +954,695 @@ Nếu máy CC firmware cũ không hỗ trợ domain name:
 ================================================================================
   HOÀN TẤT CÀI ĐẶT MÁY CHẤM CÔNG!
 ================================================================================
+
+
+================================================================================
+  SỰ CỐ 0D: ĐÃ TÌM RA NGUYÊN NHÂN GỐC — MÁY CC GỬI BINARY PROTOCOL,
+  KHÔNG PHẢI HTTP/ADMS!
+  (Cập nhật 2026-04-03 — QUAN TRỌNG NHẤT)
+================================================================================
+
+═══ PHÁT HIỆN TỪ NGINX LOG ═══
+
+  Log nginx cho thấy máy CC ĐÃ KẾT NỐI THÀNH CÔNG TỚI VPS:
+
+  nginx | 113.160.150.125 [03/Apr/2026:05:12:33]
+      "\xA5Z\x01\x00...ZXRC13013923..." 400 157
+
+  PHÂN TÍCH:
+  ──────────
+  ✅ IP 113.160.150.125 = IP public mạng WiFi của máy CC (KHÔNG phải Docker)
+     → MÁY CC ĐÃ KẾT NỐI TỚI VPS!
+
+  ✅ Serial Number = ZXRC13013923
+     → Rõ ràng trong dữ liệu binary
+
+  ❌ Dữ liệu là BINARY: \xA5\x5A (hex A5 5A) = ZK Protocol magic header
+     → Máy CC KHÔNG gửi HTTP request
+     → Máy CC gửi ZKTeco BINARY protocol (raw TCP)
+
+  ❌ Response = 400 Bad Request
+     → Nginx nhận binary data, không phải HTTP → trả 400
+     → Máy CC thử lại liên tục (hàng chục lần/giây) → vẫn 400
+
+  KẾT LUẬN CHÍNH:
+  ════════════════
+  Máy Ronald Jack AI06F (SN: ZXRC13013923) đang dùng giao thức
+  ZKTeco BINARY PUSH (không phải ADMS/iclock HTTP).
+
+  Giao thức này:
+  - Gửi raw binary TCP packets, KHÔNG phải HTTP
+  - Header bắt đầu bằng 0xA5 0x5A (magic bytes của ZKTeco)
+  - Nginx KHÔNG hiểu binary → trả 400
+  - Django KHÔNG nhận được request nào (vì nginx đã reject)
+
+  → Backend hiện tại CHỈ hỗ trợ ADMS/iclock (HTTP)
+  → CẦN thêm hỗ trợ ZK Binary Push Protocol
+
+═══ BẢNG SO SÁNH 2 GIAO THỨC ═══
+
+  ┌─────────────────────┬────────────────────────┬────────────────────────┐
+  │                     │ ADMS / iclock          │ ZK Binary Push         │
+  │                     │ (code hiện tại hỗ trợ) │ (máy CC đang dùng!)    │
+  ├─────────────────────┼────────────────────────┼────────────────────────┤
+  │ Transport           │ HTTP (text)            │ Raw TCP (binary)       │
+  │ Port thường dùng    │ 80 / 8000              │ 5005 / 4370            │
+  │ Magic bytes         │ "GET /iclock/..."      │ 0xA5 0x5A              │
+  │ Nginx proxy được?   │ ✅ Có (HTTP proxy)     │ ❌ Không (binary TCP)  │
+  │ Django view xử lý?  │ ✅ IClockCdataView     │ ❌ Cần TCP server riêng│
+  │ Cấu hình trên máy   │ Domain + Port 80       │ IP + Port 5005         │
+  └─────────────────────┴────────────────────────┴────────────────────────┘
+
+═══ CÓ 2 HƯỚNG GIẢI QUYẾT ═══
+
+────────────────────────────────────────────────────────
+HƯỚNG A (ƯU TIÊN — Nhanh): ĐỔI FIRMWARE/CÀI ĐẶT MÁY CC SANG ADMS HTTP
+────────────────────────────────────────────────────────
+
+  Một số phiên bản firmware Ronald Jack AI06F CÓ hỗ trợ cả 2 chế độ:
+  - ZK Binary Push (mặc định trên một số firmware)
+  - ADMS HTTP Push (cần bật thủ công)
+
+  KIỂM TRA VÀ ĐỔI:
+
+  Bước 1 — Xem phiên bản firmware:
+    Menu → System Info → Firmware Version
+    Ghi lại số firmware (VD: Ver 6.60 Apr 12 2019, hoặc tương tự)
+
+  Bước 2 — Tìm cài đặt "Protocol" hoặc "ADMS" trong menu:
+    Menu → Comm. (Cài đặt truyền thông)
+    → Tìm xem có mục nào tên:
+      - "ADMS" hoặc "ADMS Setting"
+      - "Protocol" (HTTP / Binary / ADMS)
+      - "Cloud Setting" vs "Push" vs "Server"
+    → Nếu có tùy chọn ADMS/HTTP → bật lên
+
+  Bước 3 — Nếu menu "Cài đặt Mchủ" có mục "Giao thức" hoặc "Protocol":
+    Đổi từ "ZK Push" → "ADMS" hoặc "HTTP"
+
+  Bước 4 — Giữ nguyên cấu hình server:
+    Tên miền: api.hrmgo.site
+    Số cổng: 80
+
+  Bước 5 — Lưu → tắt nguồn 10 giây → bật lại
+    Trên VPS: docker compose logs backend -f --tail 5
+    → Nếu thấy [iclock] Handshake từ SN=ZXRC13013923 → THÀNH CÔNG!
+
+  NẾU KHÔNG CÓ TÙY CHỌN ADMS TRONG MENU:
+    → Firmware này CHỈ hỗ trợ ZK Binary Push
+    → Cần cập nhật firmware HOẶC dùng HƯỚNG B
+
+  CẬP NHẬT FIRMWARE (nếu cần):
+    - Liên hệ đại lý Ronald Jack để lấy firmware mới nhất
+    - Yêu cầu firmware hỗ trợ "ADMS mode" hoặc "iclock HTTP push"
+    - Flash firmware qua USB (theo hướng dẫn của đại lý)
+
+────────────────────────────────────────────────────────
+HƯỚNG B (ĐÃ IMPLEMENT): ZK BINARY TCP SERVER TRÊN BACKEND
+────────────────────────────────────────────────────────
+
+  ĐÃ CODE XONG! Chỉ cần deploy lên VPS.
+
+  === KIẾN TRÚC ===
+
+    Máy CC (ZK Binary)              Django Backend
+          │                               │
+          │── TCP port 5005 ─────────────►│
+          │   (binary 0xA5 0x5A)          │
+          │                          ┌────┴─────┐
+          │                          │ZK Push   │
+          │                          │TCP Server│
+          │                          │(asyncio) │
+          │                          └────┬─────┘
+          │                               │
+          │◄── ACK packet ───────────────│
+          │                               │
+          │                          Save to DB
+          │                          WebSocket push → Frontend
+
+  Máy CC gửi binary trực tiếp tới port 5005 (KHÔNG qua nginx).
+  Nginx vẫn xử lý HTTP/HTTPS/WebSocket trên port 80/443 bình thường.
+
+  === CÁC FILE ĐÃ TẠO/SỬA ===
+
+  ✅ backend/attendance/zk_push_protocol.py    (MỚI)
+     → Parse & build ZK binary protocol packets
+     → Hỗ trợ nhiều format ATTLOG (8B, 16B, 40B, text-in-binary)
+
+  ✅ backend/attendance/management/commands/run_zk_push.py  (MỚI)
+     → Django management command chạy asyncio TCP server
+     → Nhận kết nối, parse packets, lưu DB, push WebSocket
+     → python manage.py run_zk_push --port 5005
+
+  ✅ backend/entrypoint.sh  (SỬA)
+     → Khởi động ZK Push TCP server ở background trước Daphne
+
+  ✅ backend/Dockerfile  (SỬA)
+     → EXPOSE 8000 5005
+
+  ✅ docker-compose.yml  (SỬA)
+     → ports: "5005:5005" (expose trực tiếp, bypass nginx)
+
+  === DEPLOY LÊN VPS ===
+
+  SSH vào VPS:
+    ssh root@123.30.48.72
+    cd /opt/erp
+
+  Bước 1 — Pull code mới:
+    git pull origin master
+
+    (Nếu bị conflict: git stash → git pull → git stash pop)
+
+  Bước 2 — Mở port 5005 trên firewall:
+    ufw allow 5005/tcp
+    ufw reload
+    ufw status
+    → Phải thấy: 5005/tcp  ALLOW  Anywhere
+
+  Bước 3 — Rebuild và khởi động:
+    docker compose up -d --build backend
+
+  Bước 4 — Kiểm tra cả 2 server đều chạy:
+    docker compose logs backend --tail 20
+
+    → Phải thấy:
+      → ZK Push TCP Server listening on ('0.0.0.0', 5005)
+      → Starting Daphne...
+      Listening on TCP address 0.0.0.0:8000
+
+  Bước 5 — Test port 5005 từ VPS:
+    # Kiểm tra port đang listen
+    ss -tlnp | grep 5005
+
+    → Phải thấy: LISTEN 0.0.0.0:5005
+
+  === CẤU HÌNH LẠI MÁY CHẤM CÔNG ===
+
+  Trên máy CC: Menu → Cài đặt Mchủ → đổi:
+
+    ┌──────────────────────┬────────────────────────┐
+    │ Sử dụng tên miền     │ Không                  │
+    │ IP server            │ 123.030.048.072        │
+    │ Số cổng Server       │ 5005  ← ĐỔI QUAN TRỌNG│
+    └──────────────────────┴────────────────────────┘
+
+  → Lưu → tắt nguồn 10 giây → bật lại
+
+  === THEO DÕI KẾT NỐI ===
+
+  Trên VPS:
+    docker compose logs backend -f --tail 10
+
+  Khi máy CC kết nối (sau 30-60 giây), phải thấy:
+
+    [ZK-TCP] ★ New connection from 113.160.150.125
+    [ZK-TCP] ★ Registration from SN=ZXRC13013923 seq=0 proto=b'kb1'
+    [ZK-TCP] Sending REGISTER_ACK: a55a0200...
+
+  Khi có chấm công:
+
+    [ZK-TCP] ★ ATTLOG from SN=ZXRC13013923 payload=XXB
+    [ZK-TCP] Saved: user=1 ts=2026-04-03 08:05:33 punch=0
+
+  === XỬ LÝ NẾU MÁY CC VẪN KHÔNG KẾT NỐI SAU DEPLOY ===
+
+  Nếu không thấy log kết nối sau 2 phút:
+
+  a) Kiểm tra port 5005 mở từ internet:
+     (Từ PC LAN)
+     PowerShell: Test-NetConnection 123.30.48.72 -Port 5005
+     → TcpTestSucceeded: True
+
+  b) Kiểm tra firewall VPS:
+     ufw status | grep 5005
+
+  c) Kiểm tra Docker port mapping:
+     docker compose ps
+     → backend: 0.0.0.0:5005->5005/tcp
+
+  d) Nếu PC kết nối được nhưng máy CC không:
+     → Máy CC firmware có thể chỉ gửi tới port 80
+     → Xem PHƯƠNG ÁN DỰ PHÒNG bên dưới
+
+  === PHƯƠNG ÁN DỰ PHÒNG: GIỮ PORT 80 CHO ZK BINARY ===
+
+  Nếu firmware máy CC KHÔNG cho phép đổi port (bắt buộc port 80),
+  cần chạy TCP server trên port 80 và chuyển nginx sang port khác.
+
+  Cách thực hiện (phức tạp hơn):
+  1. Đổi nginx listen 80 → listen 8080
+  2. Đổi ZK TCP server port → 80
+  3. Thêm iptables redirect port 443 → nginx container
+  4. KHÔNG khuyến nghị trừ khi bắt buộc
+
+
+THÔNG TIN MÁY CC ĐÃ XÁC NHẬN:
+───────────────────────────────
+  Serial Number: ZXRC13013923
+  IP Public (WiFi): 113.160.150.125
+  Giao thức đang dùng: ZK Binary Push (0xA5 0x5A header)
+  Kết nối tới VPS: ✅ CÓ (trước đây bị nginx reject 400)
+  Port cũ: 80 → Port MỚI: 5005
+
+TÌNH TRẠNG CŨ (phân tích ban đầu — ĐÃ ĐƯỢC THAY THẾ bởi phát hiện mới ở trên):
+──────────────────────────────────────────────────────────────────────────────────
+  (Giữ lại để tham khảo, nhưng NGUYÊN NHÂN GỐC đã được xác định:
+   MÁY CC DÙNG ZK BINARY PROTOCOL, KHÔNG PHẢI HTTP/ADMS)
+
+
+NGUYÊN NHÂN 1 (KHẢ NĂNG CAO NHẤT):
+WiFi VIEN_MAT_LC KHÔNG CÓ INTERNET THẬT SỰ CHO MÁY CC
+────────────────────────────────────────────────────────
+
+  Máy CC kết nối WiFi VIEN_MAT_LC thành công (có IP, gateway, DNS)
+  nhưng WiFi đó có thể:
+  a) Không có internet (chỉ mạng nội bộ)
+  b) Router/firewall block port 80 outbound cho một số thiết bị
+  c) Captive portal chặn HTTP (vd: phải đăng nhập WiFi trên trình duyệt)
+  d) WiFi cấp IP nhưng gateway không route ra ngoài
+
+  CÁCH KIỂM TRA:
+  ──────────────
+  Bước 1 — Xác nhận PC test LAN có cùng WiFi với máy CC:
+    PC test curl phải kết nối WiFi VIEN_MAT_LC (KHÔNG phải mạng dây/WiFi khác)
+    Kiểm tra IP PC: ipconfig → phải cùng dải 192.168.x.x với máy CC
+
+  Bước 2 — Kiểm tra máy CC có nhận đúng IP/Gateway/DNS:
+    Vào máy CC: Menu → Comm. → WiFi → xem:
+    - IP Address: phải có giá trị (VD: 192.168.1.xxx)
+    - Gateway: phải có giá trị (VD: 192.168.1.1)
+    - DNS: phải là 8.8.8.8 hoặc DNS router
+
+    Nếu IP = 0.0.0.0 hoặc trống → máy CC chưa thực sự kết nối WiFi.
+    → Quên WiFi → kết nối lại → nhập mật khẩu WiFi chính xác
+
+  Bước 3 — Test internet từ PC KẾT NỐI CÙNG WiFi VIEN_MAT_LC:
+    (Ngắt mạng dây trên PC, chỉ dùng WiFi VIEN_MAT_LC)
+    curl http://api.hrmgo.site/iclock/cdata?SN=WIFITEST
+
+    → Nếu OK: WiFi có internet, vấn đề nằm ở máy CC firmware
+    → Nếu FAIL: WiFi không có internet → ĐÂY LÀ NGUYÊN NHÂN
+
+
+NGUYÊN NHÂN 2:
+MÁY CC KHÔNG RESOLVE ĐƯỢC DOMAIN (DNS FAILURE)
+────────────────────────────────────────────────
+
+  Máy CC đang ở chế độ "Sử dụng tên miền = Có" → cần DNS.
+  Nếu DNS 8.8.8.8 không reachable từ WiFi VIEN_MAT_LC:
+  → Máy CC không biết api.hrmgo.site = IP nào → KHÔNG gửi request
+
+  CÁCH FIX — Chuyển sang IP mode (loại bỏ phụ thuộc DNS):
+  ─────────────────────────────────────────────────────────
+  Trên máy CC: Menu → Cài đặt Mchủ → đổi:
+
+    ┌──────────────────────┬────────────────────┐
+    │ Sử dụng tên miền     │ Không   ← ĐỔI     │
+    │ IP server            │ 123.030.048.072    │
+    │ Số cổng Server       │ 80                 │
+    └──────────────────────┴────────────────────┘
+
+  → Lưu → tắt nguồn máy CC 10 giây → bật lại
+  → Theo dõi log VPS: docker compose logs backend -f --tail 5
+
+
+NGUYÊN NHÂN 3:
+NGINX SERVER_NAME KHÔNG MATCH KHI MÁY CC DÙNG IP
+──────────────────────────────────────────────────
+
+  File nginx.conf port 80 hiện tại:
+    server_name api.hrmgo.site;
+
+  Khi máy CC gửi request qua IP 123.30.48.72 (không dùng domain),
+  HTTP Host header = "123.30.48.72" (không phải "api.hrmgo.site").
+
+  Nginx có thể KHÔNG match Host header này vào server block đúng.
+  → Request bị nginx xử lý sai hoặc drop.
+
+  CÁCH FIX — Thêm IP vào server_name (chạy trên VPS):
+  ────────────────────────────────────────────────────
+  nano deploy/nginx.conf
+
+  Tìm dòng (trong server block port 80):
+    server_name api.hrmgo.site;
+
+  Sửa thành:
+    server_name api.hrmgo.site 123.30.48.72;
+
+  Lưu: Ctrl+O → Enter → Ctrl+X
+  Rebuild:
+    docker compose restart nginx
+
+
+NGUYÊN NHÂN 4:
+FIRMWARE MÁY CC GỬI ĐẾN URL PATH KHÁC
+───────────────────────────────────────
+
+  Một số phiên bản firmware Ronald Jack KHÔNG gửi đến /iclock/cdata
+  mà gửi đến path khác:
+    /push/cdata
+    /push/getrequest
+
+  Trong khi nginx port 80 CHỈ proxy 2 path:
+    /iclock/   → proxy tới Django ✅
+    /cdata     → proxy tới Django ✅
+
+  Request đến /push/ → không match → nginx redirect 301 HTTPS
+  → máy CC không hỗ trợ HTTPS → FAIL im lặng (không có log)
+
+  CÁCH FIX — Thêm location /push/ vào nginx (chạy trên VPS):
+  ────────────────────────────────────────────────────────────
+  nano deploy/nginx.conf
+
+  Tìm block port 80, sau location /cdata { ... } thêm:
+
+    # Ronald Jack firmware gửi đến /push/ thay vì /iclock/
+    location /push/ {
+        limit_req zone=iclock burst=50 nodelay;
+        proxy_pass http://django;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto http;
+    }
+
+  Rebuild:
+    docker compose restart nginx
+
+
+NGUYÊN NHÂN 5:
+MIDDLEWARE (LOG) BỎ QUA REQUEST → REQUEST THỰC RA ĐÃ TỚI VPS
+──────────────────────────────────────────────────────────────
+
+  Có thể request từ máy CC đã tới nginx NHƯNG bị trả lời sai
+  hoặc middleware không log. Django log chỉ thấy request vào Django,
+  KHÔNG thấy request bị nginx xử lý trực tiếp (301, 404, 444).
+
+  CÁCH KIỂM TRA — Xem nginx access log (KHÔNG phải Django log):
+  ──────────────────────────────────────────────────────────────
+  docker compose logs nginx --tail 100
+
+  Hoặc xem file log trực tiếp:
+  docker compose exec nginx cat /var/log/nginx/access.log | tail -50
+
+  Tìm xem có request nào từ IP KHÔNG phải 172.18.x.x (Docker internal)
+  Nếu thấy IP khác (vd: IP public của mạng WiFi máy CC) → request ĐÃ TỚI
+  nhưng bị nginx xử lý sai (301 redirect, 404, v.v.)
+
+
+═══════════════════════════════════════════════════════════════
+  KẾ HOẠCH DEBUG TỪNG BƯỚC (LÀM THEO THỨ TỰ)
+═══════════════════════════════════════════════════════════════
+
+  ─── BƯỚC 1: Kiểm tra nginx access log trên VPS ───
+
+  docker compose logs nginx --tail 100
+
+  → Tìm xem có request nào từ IP bên ngoài (không phải 172.18.x.x)
+  → Nếu CÓ: request đã tới VPS nhưng bị xử lý sai → xem NGUYÊN NHÂN 3, 4
+  → Nếu KHÔNG: request chưa tới VPS → xem NGUYÊN NHÂN 1, 2
+
+  ─── BƯỚC 2: Thêm /push/ và IP vào nginx ngay (phòng hờ) ───
+
+  nano deploy/nginx.conf
+
+  a) Sửa server_name trong block port 80:
+     server_name api.hrmgo.site 123.30.48.72;
+
+  b) Thêm location /push/ trong block port 80 (sau location /cdata {...}):
+
+     location /push/ {
+         limit_req zone=iclock burst=50 nodelay;
+         proxy_pass http://django;
+         proxy_set_header Host $host;
+         proxy_set_header X-Real-IP $remote_addr;
+         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+         proxy_set_header X-Forwarded-Proto http;
+     }
+
+  c) Rebuild nginx:
+     docker compose restart nginx
+
+  ─── BƯỚC 3: Chuyển máy CC sang IP mode (loại bỏ DNS) ───
+
+  Trên máy CC: Menu → Cài đặt Mchủ:
+    Sử dụng tên miền: Không
+    IP server: 123.030.048.072
+    Số cổng Server: 80
+
+  → Lưu → tắt nguồn 10 giây → bật lại
+
+  ─── BƯỚC 4: Theo dõi cả nginx log VÀ Django log ───
+
+  Cửa sổ 1 (nginx log):
+    docker compose logs nginx -f --tail 5
+
+  Cửa sổ 2 (Django log):
+    docker compose logs backend -f --tail 5
+
+  → Đợi 60 giây sau khi máy CC bật
+  → Quan sát CẢ 2 cửa sổ xem có request nào xuất hiện
+
+  ─── BƯỚC 5: Nếu vẫn không thấy → dùng tcpdump ───
+
+  Cài tcpdump trên VPS (nếu chưa có):
+    apt install tcpdump -y
+
+  Chạy:
+    tcpdump -i eth0 port 80 -n -c 50
+
+  → Bật lại máy CC → đợi 60 giây
+  → Nếu thấy packet từ IP bên ngoài → request đã tới VPS
+     nhưng nginx/Django xử lý sai
+  → Nếu KHÔNG thấy packet nào (ngoài healthcheck):
+     → CHẮC CHẮN máy CC không gửi được request ra internet
+     → Vấn đề 100% nằm ở WiFi/mạng của máy CC
+
+  ─── BƯỚC 6 (cuối cùng): Đổi mạng cho máy CC ───
+
+  Nếu xác nhận WiFi VIEN_MAT_LC không có internet cho máy CC:
+
+  CÁCH A — Dùng mạng dây (khuyến nghị):
+    Cắm cáp mạng vào máy CC → Menu → Comm. → Ethernet → DHCP ON
+    → Máy CC nhận IP từ router
+    → Thử lại
+
+  CÁCH B — Phát WiFi Hotspot từ điện thoại:
+    Điện thoại bật Hotspot (4G/5G) → Máy CC kết nối WiFi Hotspot
+    → Test xem máy CC có gửi request được không
+    → Nếu OK: WiFi VIEN_MAT_LC là nguyên nhân
+
+  CÁCH C — Đổi sang mạng WiFi khác có internet:
+    Menu → Comm. → WiFi → chọn mạng WiFi khác
+    → Nhập mật khẩu → OK
+    → Restart máy CC
+
+
+═══════════════════════════════════════════════════════════════
+  BẢNG TÓM TẮT NGUYÊN NHÂN VÀ FIX
+═══════════════════════════════════════════════════════════════
+
+  ┌────┬──────────────────────────────┬───────────────────────────────────────┐
+  │ #  │ Nguyên nhân                  │ Fix                                   │
+  ├────┼──────────────────────────────┼───────────────────────────────────────┤
+  │ 1  │ WiFi không có internet       │ Đổi mạng (dây/hotspot/WiFi khác)     │
+  │ 2  │ DNS không resolve domain     │ Chuyển IP mode trên máy CC            │
+  │ 3  │ Nginx server_name thiếu IP   │ Thêm 123.30.48.72 vào server_name    │
+  │ 4  │ Firmware gửi path /push/     │ Thêm location /push/ vào nginx       │
+  │ 5  │ Request tới nhưng bị nginx   │ Kiểm tra nginx access log            │
+  │    │ xử lý sai (301/404)          │                                       │
+  └────┴──────────────────────────────┴───────────────────────────────────────┘
+
+  HÀNH ĐỘNG NGAY (ưu tiên từ nhanh → chậm):
+  ───────────────────────────────────────────
+
+  ① Chạy trên VPS — fix nginx (2 phút):
+     nano deploy/nginx.conf
+     → server_name api.hrmgo.site 123.30.48.72;
+     → thêm location /push/ { ... }
+     → docker compose restart nginx
+
+  ② Đổi máy CC sang IP mode (1 phút):
+     Menu → Cài đặt Mchủ → Sử dụng tên miền = Không → Lưu → Restart CC
+
+  ③ Kiểm tra nginx log (1 phút):
+     docker compose logs nginx --tail 100
+
+  ④ Nếu vẫn fail → test WiFi (5 phút):
+     PC kết nối WiFi VIEN_MAT_LC → curl http://api.hrmgo.site/iclock/cdata?SN=WIFITEST
+
+  ⑤ Nếu WiFi fail → đổi mạng cho máy CC (5 phút):
+     Hotspot điện thoại / mạng dây / WiFi khác
+
+
+================================================================================
+  PHỤ LỤC: TẠO MỚI SECRET_KEY VÀ CẬP NHẬT TRÊN VPS
+================================================================================
+
+SECRET_KEY DÙNG Ở ĐÂU TRONG CODE?
+────────────────────────────────────
+
+  SECRET_KEY được Django dùng để:
+  - Ký JWT tokens / session cookies (đăng nhập)
+  - Tạo CSRF tokens (bảo vệ form submit)
+  - Các tác vụ mã hóa nội bộ
+
+  TRONG CODEBASE NÀY, SECRET_KEY xuất hiện ở 2 nơi:
+
+  1. backend/config/settings_prod.py  (production — ĐANG DÙNG trên VPS)
+     → Dòng 13: SECRET_KEY = os.environ['SECRET_KEY']
+     → Đọc từ biến môi trường, KHÔNG hardcode
+     → ĐÂY là file chạy thật trên VPS
+
+  2. backend/config/settings.py  (development — chỉ dùng khi localhost)
+     → Dòng 31: SECRET_KEY = 'django-insecure-d)sjr@v_...'
+     → Key hardcode cho môi trường dev, KHÔNG ảnh hưởng production
+     → KHÔNG cần sửa file này
+
+  KẾT LUẬN:
+  Chỉ cần cập nhật 1 chỗ duy nhất:
+  → File backend/.env.production trên VPS  (dòng SECRET_KEY=...)
+  → Sau đó rebuild backend → Django sẽ đọc key mới
+
+
+LÀM SAO BIẾT SECRET_KEY ĐANG BỊ HỎNG?
+────────────────────────────────────────
+
+  Triệu chứng SECRET_KEY bị lỗi:
+  - Đăng nhập xong bị logout ngay lập tức
+  - Không giữ được session đăng nhập
+  - Lỗi 500 Internal Server Error khi submit form
+  - Token JWT không hợp lệ
+
+  Cách kiểm tra nhanh xem SECRET_KEY hiện tại có bị bẩn không:
+  (SSH vào VPS)
+    grep "SECRET_KEY" backend/.env.production
+
+  → Nếu thấy dòng có chứa chữ "root@" hoặc ":/opt/erp#" hoặc bất kỳ
+    ký tự shell nào → KEY BỊ HỎNG, cần tạo lại ngay.
+
+  Ví dụ key BỊ HỎNG (có shell prompt dính vào):
+    SECRET_KEY=xUlRY0KuTO3Hc1ExUDitOxMRdbPJsYeRTqHPCwQJhbEQkmNuFKroot@control-erp-hrm:/opt/erp#
+
+  Ví dụ key ĐÚNG (chỉ có ký tự chữ, số, ký hiệu):
+    SECRET_KEY=aB3xK9mP2nQr7sT4vW1yZ6cD8eF5gH0jIlLo
+
+
+CÁC BƯỚC TẠO SECRET_KEY MỚI VÀ CẬP NHẬT
+──────────────────────────────────────────
+
+  ═══ BƯỚC 1: SSH vào VPS ═══
+
+    ssh root@123.30.48.72
+    cd /opt/erp
+
+  ═══ BƯỚC 2: Tạo SECRET_KEY mới (chạy lệnh này) ═══
+
+    python3 -c 'import secrets; print(secrets.token_urlsafe(50))'
+
+    LƯU Ý: Dùng dấu NHÁY ĐƠN '...' bao quanh lệnh python, KHÔNG dùng nháy kép.
+    (Nháy kép khiến bash xử lý ký tự ! gây lỗi "event not found")
+
+    → Lệnh này tạo ra 1 chuỗi ngẫu nhiên ~67 ký tự (A-Z, a-z, 0-9, -, _), ví dụ:
+      aB3xK9mP2nQr7sT4vW1yZ6cD8eF5gH0jIlLoMpNqRsUuVwXyZa1b2c3d4e5f6g7h
+
+    QUAN TRỌNG:
+    - Copy toàn bộ chuỗi đó (chỉ copy chuỗi, KHÔNG copy dấu nhắc lệnh)
+    - KHÔNG chia sẻ chuỗi này với bất kỳ ai
+    - Lưu ở chỗ an toàn (ví dụ file notepad riêng)
+
+  ═══ BƯỚC 3: Mở file .env.production để chỉnh sửa ═══
+
+    nano backend/.env.production
+
+  ═══ BƯỚC 4: Tìm dòng SECRET_KEY và sửa ═══
+
+    Tìm dòng bắt đầu bằng SECRET_KEY=...
+    (Dùng Ctrl+W trong nano để tìm nhanh: Ctrl+W → gõ SECRET_KEY → Enter)
+
+    Xóa toàn bộ nội dung dòng đó (từ SECRET_KEY= đến hết dòng)
+    Nhập lại:
+      SECRET_KEY=<CHUỖI_VỪA_TẠO_Ở_BƯỚC_2>
+
+    Ví dụ:
+      SECRET_KEY=aB3xK9mP2nQr7sT4vW1yZ6cD8eF5gH0jIlLoMpNqRsUuVwXyZ12345678
+
+    LƯU Ý BẮT BUỘC:
+    - KHÔNG có dấu cách trước hoặc sau dấu =
+    - KHÔNG có dấu nháy đơn hay nháy kép bao quanh
+    - Dòng phải kết thúc ngay sau ký tự cuối cùng của key
+    - KHÔNG được có text thừa như "root@..." hay ":/opt/erp#"
+
+  ═══ BƯỚC 5: Lưu file ═══
+
+    Ctrl+O → Enter → Ctrl+X
+
+  ═══ BƯỚC 6: Kiểm tra lại trước khi rebuild ═══
+
+    grep "SECRET_KEY" backend/.env.production
+
+    → Phải thấy đúng 1 dòng, dạng:
+      SECRET_KEY=<60_ký_tự_sạch>
+
+    → KHÔNG có root@, KHÔNG có :/, KHÔNG có khoảng trắng thừa
+
+  ═══ BƯỚC 7: Rebuild backend ═══
+
+    docker compose up -d --build backend
+
+    Đợi 30-60 giây cho backend khởi động lại.
+
+  ═══ BƯỚC 8: Kiểm tra backend đã khởi động thành công ═══
+
+    docker compose logs backend --tail 20
+
+    → Phải thấy dòng: "Starting Daphne..."
+    → KHÔNG có dòng lỗi KeyError hoặc ImproperlyConfigured
+
+    docker compose ps
+
+    → backend phải ở trạng thái "Up (healthy)"
+
+  ═══ BƯỚC 9: Test đăng nhập ═══
+
+    Mở trình duyệt → https://hrmgo.site
+    Đăng nhập với tài khoản admin
+    → Phải vào được và giữ được phiên đăng nhập
+
+    Nếu login lỗi 500:
+    docker compose logs backend --tail 50
+    → Xem dòng lỗi cuối cùng để debug
+
+
+SAU KHI ĐỔI SECRET_KEY — ẢNH HƯỞNG GÌ?
+──────────────────────────────────────────
+
+  ⚠️  Tất cả session đăng nhập hiện tại sẽ BỊ HỦY.
+      Toàn bộ user (kể cả admin) sẽ bị logout.
+      → Đây là bình thường và an toàn.
+      → User chỉ cần đăng nhập lại 1 lần.
+
+  ✅  Database, dữ liệu chấm công, nhân viên: KHÔNG ảnh hưởng.
+  ✅  Cấu hình nginx, SSL: KHÔNG ảnh hưởng.
+  ✅  Kết nối máy chấm công ADMS: KHÔNG ảnh hưởng.
+
+
+TÓM TẮT NHANH — CHỈ CẦN 5 LỆNH
+──────────────────────────────────
+
+  # 1. Tạo key mới (copy output) — dùng nháy ĐƠN '...'
+  python3 -c 'import secrets; print(secrets.token_urlsafe(50))'
+
+  # 2. Mở file sửa
+  nano backend/.env.production
+  # → Tìm dòng SECRET_KEY=... → thay bằng key mới → Ctrl+O, Enter, Ctrl+X
+
+  # 3. Kiểm tra
+  grep "SECRET_KEY" backend/.env.production
+
+  # 4. Rebuild
+  docker compose up -d --build backend
+
+  # 5. Xác nhận chạy OK
+  docker compose ps

@@ -46,6 +46,7 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+      - "5005:5005"
 
   # ── Nginx Reverse Proxy ──
   nginx:
