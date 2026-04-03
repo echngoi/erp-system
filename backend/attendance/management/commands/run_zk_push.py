@@ -49,15 +49,19 @@ CLIENT_TIMEOUT = 300  # 5 minutes
 _register_strategy_counter = 0
 
 REGISTER_STRATEGIES = [
-    "B67_0000",          # 0: bytes[6-7] = 0x00,0x00 instead of "b1" — NEVER TESTED
-    "B15_00",            # 1: byte[15] = 0x00 instead of 0x02 — NEVER TESTED
-    "B15_01",            # 2: byte[15] = 0x01 — NEVER TESTED
-    "MIRROR_CMD",        # 3: BOTH bytes[2-3] AND bytes[12-13] set to 0x0002
-    "FLAGS_ZERO",        # 4: bytes[12-13] = 0x0000
-    "COMBO_B67_B15",     # 5: bytes[6-7]=0, byte[15]=0, bytes[12-13]=0x0002
-    "SIZE_17B",          # 6: Exact 17 bytes — narrow RST boundary (16→FIN, 20→RST)
-    "SIZE_18B",          # 7: Exact 18 bytes
-    "B1213_SWAP",        # 8: bytes[12-13] = 0x0100 (swapped from 0x0001)
+    # ── ROUND 6: ALL responses are EXACTLY 16 bytes ──
+    # Key insight: 16B → device FINs (parses but wrong content)
+    #              17B+ → device RSTs (immediate reject)
+    # We only tried 2 different 16B contents before. Now try 9 more.
+    "R16_ECHO",          # 0: First 16 bytes echoed EXACTLY (no changes at all)
+    "R16_CMD8001",       # 1: cmd=0x8001 (response flag bit set, common in ZK)
+    "R16_CMD0001",       # 2: cmd stays 0x0001 (server echoes same command)
+    "R16_ALLZERO",       # 3: A5 5A + 14 zero bytes (minimal valid magic)
+    "R16_SEQ_INC",       # 4: cmd=0x0002, byte5=original+1 (server acks seq)
+    "R16_SEQ_SWAP",      # 5: cmd=0x0002, swap byte4↔byte5
+    "R16_B15_00",        # 6: cmd=0x0002, byte15=0x00
+    "R16_B15_03",        # 7: cmd=0x0002, byte15=0x03
+    "R16_FLAGS_0002",    # 8: cmd=0x0002, bytes[12-13]=0x0002
     "NO_RESPONSE",       # 9: Control — send nothing
 ]
 
@@ -205,59 +209,60 @@ class ZKPushClientHandler:
             logger.warning(f"[ZK-TCP] Strategy NO_RESPONSE: sending nothing")
             return
 
-        # ── SIZE_17B / SIZE_18B: narrow RST boundary ──
-        size_map = {"SIZE_17B": 17, "SIZE_18B": 18}
-        if strategy in size_map:
-            target_size = size_map[strategy]
-            ack = bytearray(packet.raw[:target_size])
-            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+        # ── ALL strategies in Round 6 are EXACTLY 16 bytes ──
+        # Take first 16 bytes of original packet as base
+        ack = bytearray(packet.raw[:16])
+
+        if strategy == "R16_ECHO":
+            # Pure echo of first 16 bytes — zero changes
+            pass
+
+        elif strategy == "R16_CMD8001":
+            # cmd = 0x8001 (high bit = "response" in many ZK variants)
+            struct.pack_into('<H', ack, 2, 0x8001)
             _apply_checksum(ack)
-            ack_bytes = bytes(ack)
-            logger.info(f"[ZK-TCP] Sending {strategy} ({len(ack_bytes)}B): {ack_bytes.hex()}")
-            await self._send(ack_bytes)
-            return
 
-        # ── All remaining strategies: full 48B with specific field changes ──
-        ack = bytearray(packet.raw)
-        struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)  # cmd = 0x0002
+        elif strategy == "R16_CMD0001":
+            # cmd stays 0x0001 — server "registers" itself too
+            # No cmd change needed, just recompute checksum
+            pass  # exact echo, cmd already 0x0001
 
-        if strategy == "B67_0000":
-            # Bytes 6-7 are "b1" (0x62 0x31) in device packet — NEVER varied before
-            ack[6] = 0x00
-            ack[7] = 0x00
+        elif strategy == "R16_ALLZERO":
+            # Minimal: A5 5A + 14 zero bytes
+            ack = bytearray(b'\xa5\x5a' + b'\x00' * 14)
 
-        elif strategy == "B15_00":
-            # Byte 15 is always 0x02 or 0x03 in device packet — NEVER varied
+        elif strategy == "R16_SEQ_INC":
+            # cmd=0x0002, byte5 = device_seq + 1 (acknowledging sequence)
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            ack[5] = (packet.send_seq + 1) & 0xFF
+            _apply_checksum(ack)
+
+        elif strategy == "R16_SEQ_SWAP":
+            # cmd=0x0002, swap byte4↔byte5
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            ack[4], ack[5] = ack[5], ack[4]
+            _apply_checksum(ack)
+
+        elif strategy == "R16_B15_00":
+            # cmd=0x0002, byte15=0x00
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
             ack[15] = 0x00
+            _apply_checksum(ack)
 
-        elif strategy == "B15_01":
-            # Try byte 15 = 0x01
-            ack[15] = 0x01
+        elif strategy == "R16_B15_03":
+            # cmd=0x0002, byte15=0x03
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
+            ack[15] = 0x03
+            _apply_checksum(ack)
 
-        elif strategy == "MIRROR_CMD":
-            # Change BOTH cmd fields: bytes[2-3]=0x0002 AND bytes[12-13]=0x0002
+        elif strategy == "R16_FLAGS_0002":
+            # cmd=0x0002, bytes[12-13]=0x0002
+            struct.pack_into('<H', ack, 2, CMD_REGISTER_ACK)
             struct.pack_into('<H', ack, 12, 0x0002)
+            _apply_checksum(ack)
 
-        elif strategy == "FLAGS_ZERO":
-            # bytes[12-13] = 0x0000
-            ack[12] = 0x00
-            ack[13] = 0x00
-
-        elif strategy == "COMBO_B67_B15":
-            # Zero proto_ver + byte15 + change flags — all untouched fields at once
-            ack[6] = 0x00
-            ack[7] = 0x00
-            ack[15] = 0x00
-            struct.pack_into('<H', ack, 12, 0x0002)
-
-        elif strategy == "B1213_SWAP":
-            # bytes[12-13] = 0x0100 instead of 0x0001 (swap byte order)
-            ack[12] = 0x01
-            ack[13] = 0x00
-
-        _apply_checksum(ack)
         ack_bytes = bytes(ack)
-        logger.info(f"[ZK-TCP] Sending REGISTER_ACK ({len(ack_bytes)}B) [{strategy}]: {ack_bytes.hex()}")
+        logger.info(f"[ZK-TCP] Sending 16B [{strategy}]: {ack_bytes.hex()}")
         await self._send(ack_bytes)
 
     async def _handle_heartbeat(self, packet):
