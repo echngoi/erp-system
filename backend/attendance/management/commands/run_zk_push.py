@@ -206,28 +206,38 @@ class ZKPushClientHandler:
         if self.registered:
             _device_last_ack_time[ip] = now
 
+            # Decode session and flags BEFORE building ACK
+            session_val = struct.unpack_from('<I', raw, 8)[0]  # uint32 LE
+            byte12 = raw[12]
+            byte13 = raw[13]
+
             # ── SEND ACK IMMEDIATELY — before any DB ops ─────────────────
             # Critical: device disconnects ~20ms after sending punch packet.
-            # If we do DB save first, the ACK arrives after device disconnects,
-            # so device never clears its notification → replays forever.
             ack = bytearray(16)
             ack[0:2] = b'\x5a\xa5'
             ack[2:4] = raw[2:4]
             ack[4] = raw[4]                   # ECHO seq (not +1) for heartbeat
             ack[5] = raw[5]
             ack[6:8] = raw[6:8]
-            ack[8:12] = raw[8:12]
+
+            if session_val != 0:
+                # PUNCH EVENT: Clear session bytes in ACK → tells device
+                # "notification received, clear your cache" so it stops replaying.
+                # If we echo back the session value, the device thinks the
+                # notification is still pending and replays forever.
+                ack[8:12] = b'\x00\x00\x00\x00'
+            else:
+                ack[8:12] = raw[8:12]
+
             ack[12] = 0x32
             ack[13] = 0x01
             ack[14] = sum(ack[0:14]) & 0xFF
             ack[15] = raw[15]
 
-            await self._send(bytes(ack))
-
-            # Decode session and flags for event detection
-            session_val = struct.unpack_from('<I', raw, 8)[0]  # uint32 LE
-            byte12 = raw[12]
-            byte13 = raw[13]
+            ack_bytes = bytes(ack)
+            if session_val != 0:
+                logger.info(f"[ZK-TCP] Sending PUNCH ACK (session cleared): {ack_bytes.hex()}")
+            await self._send(ack_bytes)
 
             # ── PUNCH EVENT: session != 0 means attendance event ──────────
             # From proxy capture: Mita Pro session=0x1e when punch, VPS session=0x78
