@@ -8,7 +8,7 @@ import {
   DownloadOutlined, SearchOutlined
 } from '@ant-design/icons';
 import dayjs from 'dayjs';
-import { getAttendance, syncAttendance, clearAttendance, getEmployees } from '../../services/attendanceApi';
+import { getAttendance, syncAttendance, clearAttendance, getEmployees, deleteAttendanceLogs } from '../../services/attendanceApi';
 
 const { RangePicker } = DatePicker;
 const { Text } = Typography;
@@ -29,6 +29,7 @@ export default function AttendancePage() {
   const [loading, setLoading]   = useState(false);
   const [syncing, setSyncing]   = useState(false);
   const [employees, setEmployees] = useState([]);
+  const [selectedRowKeys, setSelectedRowKeys] = useState([]);
   const [filters, setFilters]   = useState({
     page: 1, page_size: 50,
     date_from: dayjs().startOf('month').format('YYYY-MM-DD'),
@@ -98,6 +99,29 @@ export default function AttendancePage() {
     a.click();
   };
 
+  const handleBulkDelete = async () => {
+    if (!selectedRowKeys.length) return;
+    try {
+      const res = await deleteAttendanceLogs(selectedRowKeys);
+      message.success(res.data.message);
+      setSelectedRowKeys([]);
+      load();
+    } catch (e) {
+      message.error(e.response?.data?.error || 'Lỗi xóa bản ghi');
+    }
+  };
+
+  const handleDeleteOne = async (id) => {
+    try {
+      const res = await deleteAttendanceLogs([id]);
+      message.success(res.data.message);
+      setSelectedRowKeys(keys => keys.filter(k => k !== id));
+      load();
+    } catch (e) {
+      message.error(e.response?.data?.error || 'Lỗi xóa bản ghi');
+    }
+  };
+
   const columns = [
     {
       title: 'Mã NV',
@@ -144,6 +168,20 @@ export default function AttendancePage() {
       dataIndex: 'status',
       width: 90,
       render: v => <Tag>{v}</Tag>,
+    },
+    {
+      title: '',
+      key: 'action',
+      width: 50,
+      render: (_, r) => (
+        <Popconfirm
+          title="Xóa bản ghi này?"
+          onConfirm={() => handleDeleteOne(r.id)}
+          okText="Xóa" cancelText="Hủy" okButtonProps={{ danger: true }}
+        >
+          <Button type="text" danger icon={<DeleteOutlined />} size="small" />
+        </Popconfirm>
+      ),
     },
   ];
 
@@ -210,6 +248,18 @@ export default function AttendancePage() {
         bordered={false}
         extra={
           <Space>
+            {selectedRowKeys.length > 0 && (
+              <Popconfirm
+                title={`Xóa ${selectedRowKeys.length} bản ghi đã chọn?`}
+                description="Hành động này không thể hoàn tác."
+                onConfirm={handleBulkDelete}
+                okText="Xóa" cancelText="Hủy" okButtonProps={{ danger: true }}
+              >
+                <Button icon={<DeleteOutlined />} danger type="primary">
+                  Xóa {selectedRowKeys.length} đã chọn
+                </Button>
+              </Popconfirm>
+            )}
             <Tooltip title="Đồng bộ từ máy">
               <Button icon={<SyncOutlined spin={syncing} />} onClick={handleSync} loading={syncing} type="primary">
                 Đồng bộ
@@ -234,6 +284,10 @@ export default function AttendancePage() {
           rowKey="id"
           loading={loading}
           size="middle"
+          rowSelection={{
+            selectedRowKeys,
+            onChange: setSelectedRowKeys,
+          }}
           pagination={{
             current: filters.page,
             pageSize: filters.page_size,

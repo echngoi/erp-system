@@ -272,6 +272,37 @@ class ClearAttendanceView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class DeleteAttendanceLogsView(APIView):
+    """Bulk delete attendance log records from database."""
+    permission_classes = [IsAdmin]
+
+    def post(self, request):
+        ids = request.data.get('ids', [])
+        if not ids:
+            return Response({'error': 'Chưa chọn bản ghi nào'},
+                            status=status.HTTP_400_BAD_REQUEST)
+        if not isinstance(ids, list) or len(ids) > 5000:
+            return Response({'error': 'Danh sách ID không hợp lệ (tối đa 5000)'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        count, _ = AttendanceLog.objects.filter(id__in=ids).delete()
+        return Response({
+            'message': f'Đã xóa {count} bản ghi chấm công',
+            'deleted': count,
+        })
+
+    def delete(self, request):
+        """Delete a single record by ?id= query param."""
+        record_id = request.query_params.get('id')
+        if not record_id:
+            return Response({'error': 'Thiếu id'}, status=status.HTTP_400_BAD_REQUEST)
+        count, _ = AttendanceLog.objects.filter(id=record_id).delete()
+        if count == 0:
+            return Response({'error': 'Không tìm thấy bản ghi'},
+                            status=status.HTTP_404_NOT_FOUND)
+        return Response({'message': 'Đã xóa bản ghi', 'deleted': count})
+
+
 class EmployeeListView(APIView):
     """List all employees (from local DB)."""
     permission_classes = [IsAdmin]

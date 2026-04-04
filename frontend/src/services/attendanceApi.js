@@ -25,6 +25,7 @@ export const bulkToggleEmployeeActive = (ids, isActive) => api.patch(`${ATTENDAN
 export const getAttendance     = (params) => api.get(`${ATTENDANCE_BASE}/attendance/`, { params });
 export const getLiveAttendance = () => api.get(`${ATTENDANCE_BASE}/attendance/live/`);
 export const clearAttendance   = () => api.post(`${ATTENDANCE_BASE}/attendance/clear/`);
+export const deleteAttendanceLogs = (ids) => api.post(`${ATTENDANCE_BASE}/attendance/delete/`, { ids });
 
 // ── Dashboard ────────────────────────────────────────────
 export const getDashboardStats = () => api.get(`${ATTENDANCE_BASE}/dashboard/stats/`);

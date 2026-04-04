@@ -23,6 +23,7 @@ urlpatterns = [
     path('attendance/',       views.AttendanceListView.as_view(), name='attendance-list'),
     path('attendance/live/',  views.LiveAttendanceView.as_view(), name='attendance-live'),
     path('attendance/clear/', views.ClearAttendanceView.as_view(),name='attendance-clear'),
+    path('attendance/delete/', views.DeleteAttendanceLogsView.as_view(), name='attendance-delete'),
 
     # Dashboard
     path('dashboard/stats/', views.DashboardStatsView.as_view(), name='dashboard-stats'),
