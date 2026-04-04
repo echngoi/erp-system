@@ -107,14 +107,31 @@ SSH vào VPS rồi chạy:
   PULL BỊ CONFLICT (VPS CÓ THAY ĐỔI LOCAL)
 ────────────────────────────────────────────────
 
-  Nếu git pull báo conflict, dùng:
+  Triệu chứng — git pull báo lỗi kiểu này:
 
-  git fetch origin
-  git reset --hard origin/master
+    error: Your local changes to the following files would be overwritten by merge:
+            deploy/nginx.conf
+    Please commit your changes or stash them before you merge.
+    Aborting
 
-  CẢNH BÁO: Lệnh này XÓA toàn bộ thay đổi local trên VPS.
+  Cách fix — chạy 3 lệnh này trên VPS:
+
+    git fetch origin
+    git reset --hard origin/master
+    docker compose restart nginx
+
+  Giải thích:
+    git fetch origin          → tải code mới từ GitHub về (chưa merge)
+    git reset --hard ...      → xóa thay đổi local, đồng bộ hoàn toàn với GitHub
+    docker compose restart    → áp dụng config mới (nginx.conf hoặc file khác)
+
+  CẢNH BÁO: Lệnh git reset --hard sẽ XÓA toàn bộ thay đổi local trên VPS.
   Chỉ dùng khi chắc chắn không có dữ liệu quan trọng trên VPS cần giữ.
   File backend/.env.production KHÔNG bị ảnh hưởng (không được commit vào git).
+
+  Kiểm tra sau khi fix:
+    docker compose ps
+    docker compose logs nginx --tail 10
 
 
 ================================================================================
