@@ -53,14 +53,18 @@ _device_rapid_count = {}      # IP → count of suppressed rapid reconnects
 RAPID_RECONNECT_THRESHOLD = 2.0  # seconds — below this = rapid reconnect
 
 # ── Punch event deduplication ─────────────────────────────────────────────────
-# The device replays its cached punch notification every connection cycle (~10s)
-# because on WAN it disconnects before completing the full punch→data-ready→clear
-# conversation.  Raw bytes are IDENTICAL for every replay of the same user, so
-# we CANNOT dedup by raw bytes (it permanently blocks re-punches).
-# Strategy: fast in-memory time dedup (60s) + DB-level dedup (5 min).
-_last_punch_time = {}         # user_id → time.time() of last saved punch
-PUNCH_DEDUP_WINDOW = 60       # seconds — in-memory cooldown per user
-PUNCH_DB_DEDUP_MINUTES = 5    # minutes — DB-level dedup window
+# The device replays its cached punch notification every ~10s with IDENTICAL
+# raw bytes and session value.  The ONLY reliable signal for a new real punch
+# is when the session value CHANGES (= a different user punched on the device).
+#
+# Strategy:
+# 1. In-memory 60s flood control — prevents replay flood from hitting DB
+# 2. Session change detection — save only when session_val differs from last saved
+# 3. Long timeout fallback (4h) — re-save same session to catch check-out
+_last_punch_time = {}         # user_id → time.time() for flood control
+_last_saved_session = {}      # SN → (session_val, save_timestamp)
+PUNCH_DEDUP_WINDOW = 60       # seconds — in-memory flood control
+PUNCH_SAME_USER_HOURS = 4     # hours — re-save same session after this long
 
 
 class ZKPushClientHandler:
@@ -305,25 +309,43 @@ class ZKPushClientHandler:
         The device signals a new punch via session bytes != 0 in a heartbeat
         REGISTER packet. session_val = user_id on the device (uint32 LE).
 
-        On WAN, the device replays the same cached notification every ~10s
-        with IDENTICAL raw bytes. We CANNOT dedup by raw bytes (it permanently
-        blocks re-punches by the same user). Instead we use:
-        1. In-memory time window (60s) — fast, prevents rapid DB queries
-        2. DB-level dedup (5 min) — prevents phantom records from replay loop
+        The device replays the SAME cached notification every ~10s with
+        identical session value. The ONLY reliable signal for a new punch is
+        when session_val CHANGES (different user punched).
+
+        Dedup layers:
+        1. In-memory 60s flood control — fast, no DB hit
+        2. Session change detection — only save when session differs
+        3. 4-hour fallback — re-save same session for check-out scenario
         """
         user_id = str(session_val)
         now = time.time()
 
-        # ── Dedup: Same user within cooldown window ──────────────────────────
+        # ── Layer 1: Flood control (60s) — prevents replay from hitting DB ───
         last_time = _last_punch_time.get(user_id, 0)
         if (now - last_time) < PUNCH_DEDUP_WINDOW:
             logger.info(f"[ZK-TCP] Duplicate punch user={user_id} "
                         f"within {PUNCH_DEDUP_WINDOW}s — skipping")
             return
 
-        # ── New punch event — save it ────────────────────────────────────────
+        # Always update flood marker (even if we skip below)
         _last_punch_time[user_id] = now
 
+        # ── Layer 2: Session change detection ────────────────────────────────
+        prev = _last_saved_session.get(serial_number)
+        if prev is not None:
+            prev_session, prev_save_time = prev
+            if prev_session == session_val:
+                hours_since = (now - prev_save_time) / 3600
+                if hours_since < PUNCH_SAME_USER_HOURS:
+                    logger.info(f"[ZK-TCP] Replay: user={user_id} same session "
+                                f"({hours_since:.1f}h since save) — skipping")
+                    return
+                else:
+                    logger.warning(f"[ZK-TCP] Same user {user_id} re-punch after "
+                                   f"{hours_since:.1f}h — saving (check-out?)")
+
+        # ── New punch event — save it ────────────────────────────────────────
         from attendance.zk_push_protocol import AttendanceRecord
 
         ts = timezone.now()  # Aware UTC datetime — correct in any timezone
@@ -341,15 +363,15 @@ class ZKPushClientHandler:
 
         saved, new_records = await self._save_attendance_records([record])
 
+        # Always mark session as handled (prevents phantom saves from replays)
+        _last_saved_session[serial_number] = (session_val, now)
+
         if new_records:
             await self._notify_websocket(new_records)
             logger.warning(f"[ZK-TCP] ✓ Punch saved and pushed to WebSocket! "
                            f"user={user_id} saved={saved}")
         else:
-            # DB dedup caught it or save failed — clear time marker so next window retries
-            _last_punch_time.pop(user_id, None)
-            logger.info(f"[ZK-TCP] Punch not saved (DB dedup or error): user={user_id} "
-                        f"saved={saved}")
+            logger.info(f"[ZK-TCP] Punch not saved (DB duplicate): user={user_id}")
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
@@ -521,7 +543,6 @@ def _sync_save_attendance(records, sn):
     """Save attendance records to database (sync, for thread pool)."""
     from attendance.models import Employee, AttendanceLog, SyncLog
     from django.utils import timezone as tz
-    from datetime import timedelta
 
     saved = 0
     new_records = []
@@ -531,16 +552,6 @@ def _sync_save_attendance(records, sn):
             ts = rec.timestamp
             if timezone.is_naive(ts):
                 ts = timezone.make_aware(ts)
-
-            # ── DB-level dedup: skip if same user has record within N minutes ─
-            recent_cutoff = ts - timedelta(minutes=PUNCH_DB_DEDUP_MINUTES)
-            if AttendanceLog.objects.filter(
-                user_id=rec.user_id,
-                timestamp__gte=recent_cutoff,
-            ).exists():
-                logger.info(f"[ZK-TCP] DB dedup: user={rec.user_id} already has "
-                            f"record within {PUNCH_DB_DEDUP_MINUTES} min — skipping")
-                continue
 
             employee = Employee.objects.select_related(
                 'linked_user__department'
