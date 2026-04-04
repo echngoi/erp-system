@@ -270,6 +270,47 @@ class ZKPushClientHandler:
         gap = now - last_ack
 
         if gap < RAPID_RECONNECT_THRESHOLD:
+            # Check if this rapid reconnect carries a PUNCH notification.
+            # Device pattern: after normal connection (REGISTER → ACK → punch → close),
+            # device immediately reconnects and sends the punch DIRECTLY (no handshake).
+            # If we suppress this, the device never receives notification-clear ACK
+            # → stuck forever → ALL subsequent employee punches are lost.
+            session_val = struct.unpack_from('<I', raw, 8)[0]
+            if session_val != 0:
+                # PUNCH on rapid reconnect — DO NOT suppress! Process it.
+                logger.warning(f"[ZK-TCP] ⚡ Rapid reconnect with PUNCH "
+                               f"session=0x{session_val:X} ({session_val}) from "
+                               f"SN={packet.serial_number} (gap={gap:.3f}s) "
+                               f"— processing (not suppressed)")
+                _device_rapid_count[ip] = 0
+                _device_last_ack_time[ip] = now
+                self.registered = True
+                self.serial_number = packet.serial_number
+
+                # Build and send PUNCH ACK with session cleared
+                ack = bytearray(16)
+                ack[0:2] = b'\x5a\xa5'
+                ack[2:4] = raw[2:4]
+                ack[4] = raw[4]               # Echo seq for heartbeat/punch
+                ack[5] = raw[5]
+                ack[6:8] = raw[6:8]
+                ack[8:12] = b'\x00\x00\x00\x00'  # Clear session → device clears notification
+                ack[12] = 0x32
+                ack[13] = 0x01
+                ack[14] = sum(ack[0:14]) & 0xFF
+                ack[15] = raw[15]
+
+                ack_bytes = bytes(ack)
+                logger.info(f"[ZK-TCP] Sending RAPID PUNCH ACK (session cleared): {ack_bytes.hex()}")
+                await self._send(ack_bytes)
+
+                # Handle the punch event (dedup will filter replays)
+                logger.warning(f"[ZK-TCP] ★★ PUNCH EVENT (rapid) from SN={packet.serial_number} "
+                               f"session=0x{session_val:X} ({session_val}) raw={raw.hex()}")
+                await self._handle_punch_event(packet.serial_number, session_val, raw)
+                return
+
+            # Idle rapid reconnect (session=0) — suppress as before
             count = _device_rapid_count.get(ip, 0) + 1
             _device_rapid_count[ip] = count
             if count == 1 or count % 100 == 0:
@@ -312,6 +353,14 @@ class ZKPushClientHandler:
         ack_bytes = bytes(ack)
         logger.info(f"[ZK-TCP] Sending REGISTER ACK (16B): {ack_bytes.hex()}")
         await self._send(ack_bytes)
+
+        # ── Check if this REGISTER also carries a punch (session != 0) ────
+        # Some connections carry both registration AND punch in single packet.
+        session_val = struct.unpack_from('<I', raw, 8)[0]
+        if session_val != 0:
+            logger.warning(f"[ZK-TCP] ★★ PUNCH in REGISTER from SN={packet.serial_number} "
+                           f"session=0x{session_val:X} ({session_val})")
+            await self._handle_punch_event(packet.serial_number, session_val, raw)
 
     async def _handle_punch_event(self, serial_number, session_val, raw_bytes):
         """Handle attendance punch event embedded in heartbeat REGISTER.
