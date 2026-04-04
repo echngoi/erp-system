@@ -1646,3 +1646,263 @@ TÓM TẮT NHANH — CHỈ CẦN 5 LỆNH
 
   # 5. Xác nhận chạy OK
   docker compose ps
+
+
+================================================================================
+  PHỤ LỤC: ZK PULL QUA PORT FORWARDING (MIKROTIK + PYZK)
+  Giải pháp thu thập dữ liệu chấm công đáng tin cậy
+  Ngày triển khai: 04/04/2026
+================================================================================
+
+  TỔNG QUAN
+  ──────────
+
+  Máy CC Ronald Jack AI06F dùng giao thức ZKTeco BINARY TCP (không phải HTTP).
+  Giao thức này không tương thích với Nginx, do đó KHÔNG thể dùng ADMS HTTP.
+
+  Giải pháp được triển khai: VPS CHỦ ĐỘNG KẾT NỐI tới máy CC qua pyzk
+  (ZKTeco binary, port 4370) để pull toàn bộ dữ liệu chấm công mỗi 60 giây.
+
+  2 tiến trình chạy song song:
+    - run_zk_push (port 7005): tiếp tục nhận push từ máy CC (realtime tốt nhất)
+    - run_zk_pull (port 4370): pull định kỳ từ máy CC (backup đáng tin cậy)
+
+  Sơ đồ kết nối:
+
+    VPS (123.30.48.72)
+          │
+          │  ZKBinaryService._connect()
+          │  "113.160.150.125:4370"
+          │
+          ▼
+    Router MikroTik (WAN: 113.160.150.125)
+          │
+          │  NAT dstnat: dst-port=4370 → to-addresses=192.168.1.225:4370
+          │
+          ▼
+    Máy CC Ronald Jack AI06F (LAN: 192.168.1.225:4370)
+          │
+          │  pyzk binary protocol
+          │  conn.get_attendance() → tất cả bản ghi chấm công
+          │
+          ▼
+    Django lưu vào DB (get_or_create → không tạo trùng)
+    → WebSocket push realtime lên frontend
+
+  Ưu điểm so với ZK Push:
+    ✅ Timestamp CHÍNH XÁC từ máy (không do server tạo)
+    ✅ Lấy được TOÀN BỘ log trên máy CC
+    ✅ Không bị mất data khi notification cache bị kẹt
+    ✅ Idempotent: pull bao nhiêu lần cũng không tạo duplicate
+
+  Điều kiện đã xác nhận:
+    ✅ IP WAN 113.160.150.125 — IP TĨNH đã đăng ký với VNPT
+    ✅ Có quyền admin MikroTik WinBox tại 192.168.1.1
+    ✅ pyzk==0.9 đã có trong requirements.txt
+    ✅ ZKBinaryService đã code sẵn trong attendance/zk_service.py
+
+
+  BƯỚC 1 — MIKROTIK: THÊM NAT PORT FORWARDING
+  ─────────────────────────────────────────────
+
+  Mở WinBox → đăng nhập router 192.168.1.1
+  Vào: New Terminal (menu trái)
+
+  Chạy lệnh sau trong terminal MikroTik:
+
+    /ip firewall nat add \
+      chain=dstnat \
+      dst-address=113.160.150.125 \
+      protocol=tcp \
+      dst-port=4370 \
+      action=dst-nat \
+      to-addresses=192.168.1.225 \
+      to-ports=4370 \
+      comment="ZK attendance machine port 4370"
+
+  Xác nhận rule đã được tạo:
+
+    /ip firewall nat print
+
+  → Phải thấy rule mới xuất hiện với:
+      dst-port=4370
+      to-addresses=192.168.1.225
+      to-ports=4370
+
+  LƯU Ý VỀ RULE HIỆN CÓ (tham chiếu từ màn hình WinBox):
+    #0 dstnat → 113.160.150.125 tcp:8088   (may chu hoadon)
+    #1 dstnat → 113.160.150.125 tcp:8090   (tra cuu hoa don)
+    #5 dstnat → 113.160.150.125 tcp:22     (SSH)
+    → Rule mới (port 4370) sẽ thêm vào danh sách này
+
+  KIỂM TRA PORT FORWARDING (từ bên ngoài mạng LAN):
+
+    Từ VPS hoặc máy khác ngoài internet:
+    nc -zv 113.160.150.125 4370
+
+    → Nếu "Connected": port forwarding hoạt động đúng
+    → Nếu "Connection refused" hoặc timeout: kiểm tra lại rule MikroTik
+
+
+  BƯỚC 2 — VPS: CẬP NHẬT .ENV.PRODUCTION
+  ─────────────────────────────────────────
+
+  SSH vào VPS:
+
+    ssh root@123.30.48.72
+    cd /opt/erp
+
+  Mở file cấu hình:
+
+    nano backend/.env.production
+
+  Tìm và SỬA 3 dòng sau:
+
+    ZK_DEVICE_IP=113.160.150.125     ← WAN IP của router MikroTik
+    ZK_DEVICE_PORT=4370              ← ZKTeco binary protocol port
+    ZK_PROTOCOL=binary               ← kích hoạt ZKBinaryService (pyzk)
+
+  LƯU Ý:
+    - ZK_DEVICE_IP phải là IP WAN (113.160.150.125), KHÔNG phải IP LAN (192.168.1.225)
+    - ZK_DEVICE_PORT=4370 (ZKTeco binary), khác với 7005 (ZK push server của VPS)
+    - ZK_PROTOCOL=binary bắt buộc, nếu để "adms" thì pyzk không được gọi
+
+  Lưu file: Ctrl+O → Enter → Ctrl+X
+
+  Kiểm tra lại:
+
+    grep "ZK_" backend/.env.production
+
+  → Phải thấy:
+      ZK_DEVICE_IP=113.160.150.125
+      ZK_DEVICE_PORT=4370
+      ZK_PROTOCOL=binary
+
+
+  BƯỚC 3 — VPS: DEPLOY
+  ─────────────────────
+
+  Pull code mới:
+
+    git pull origin master
+
+  Build và khởi động lại backend:
+
+    docker compose up -d --build backend
+
+  Theo dõi log khởi động:
+
+    docker compose logs backend -f --tail 30
+
+  LOG MONG ĐỢI khi khởi động thành công:
+
+    → Waiting for database...
+    → Running migrations...
+    → Collecting static files...
+    → Starting ZK Push TCP Server (port 7005)...
+      ZK Push TCP Server started (PID=XX)
+    → Starting ZK Pull Client (pyzk, every 60s)...
+      ZK Pull Client started (PID=XX)
+    → Starting Daphne...
+
+  LOG MONG ĐỢI sau 60 giây (khi pull thành công):
+
+    [ZK-PULL] ✓ Saved 45 new records (device total: 45)
+
+  LOG NẾU KẾT NỐI THẤT BẠI:
+
+    [ZK-PULL] Cannot connect to device: ...
+
+  → Kiểm tra lại Bước 1 (MikroTik NAT rule) và Bước 2 (IP/port đúng chưa)
+
+
+  BƯỚC 4 — KIỂM TRA
+  ──────────────────
+
+  4.1. Test thủ công (không cần đợi 60s):
+
+    docker compose exec backend python manage.py run_zk_pull --once
+
+    → LOG THÀNH CÔNG:
+        [ZK-PULL] One-time pull from 113.160.150.125:4370...
+        [ZK-PULL] ✓ Saved XX new records (device total: XX)
+        [ZK-PULL] Done. XX new records saved.
+
+    → LOG NẾU LỖI:
+        [ZK-PULL] Cannot connect to device: [Errno 111] Connection refused
+        (→ Kiểm tra lại MikroTik NAT rule)
+
+        [ZK-PULL] Cannot connect to device: timed out
+        (→ Router không forward port, hoặc máy CC không nghe port 4370)
+
+  4.2. Kiểm tra tiến trình đang chạy:
+
+    docker compose exec backend ps aux | grep run_zk
+
+    → Phải thấy 2 tiến trình:
+        python manage.py run_zk_push --port 7005
+        python manage.py run_zk_pull --interval 60
+
+  4.3. Kiểm tra dữ liệu đã lưu vào DB:
+
+    docker compose exec backend python manage.py shell -c "
+    from attendance.models import AttendanceLog
+    print('Tổng số bản ghi:', AttendanceLog.objects.count())
+    for r in AttendanceLog.objects.order_by('-id')[:10]:
+        print(f'  id={r.id} user_id={r.user_id} ts={r.timestamp} punch={r.punch}')
+    "
+
+  4.4. Kiểm tra trên giao diện web:
+
+    Mở https://hrmgo.site → Chấm công → Attendance Logs
+    → Phải thấy các bản ghi chấm công với timestamp chính xác từ máy CC
+
+
+  XỬ LÝ SỰ CỐ
+  ────────────
+
+  ❌ "Connection refused" (port 4370):
+     → MikroTik NAT rule chưa đúng, hoặc máy CC không lắng nghe port 4370
+     → Kiểm tra: /ip firewall nat print trên MikroTik
+     → Thử kết nối LAN: nc -zv 192.168.1.225 4370
+
+  ❌ "Connection timed out":
+     → Firewall VPS hoặc MikroTik chặn kết nối outbound
+     → Kiểm tra ufw trên VPS: ufw status (port outbound không bị chặn)
+
+  ❌ "ZK binary connect failed: No module named 'zk'":
+     → pyzk chưa được cài. Chạy: docker compose up -d --build backend
+
+  ❌ Pull thành công nhưng 0 bản ghi mới:
+     → Tất cả dữ liệu đã có trong DB rồi (bình thường khi pull lần 2+)
+     → Kiểm tra: SELECT COUNT(*) FROM attendance_attendancelog;
+
+  ❌ Timestamp sai giờ (lệch 7h):
+     → Trong zk_service.py, hàm get_all_attendance() trả timestamp dạng string
+        không có timezone info. Kiểm tra xem Django đang dùng timezone.make_aware()
+        với đúng timezone (Asia/Ho_Chi_Minh) chưa.
+
+  ❌ ZK Pull chạy nhưng ZK Push bị crash:
+     → 2 tiến trình hoàn toàn độc lập, một cái crash không ảnh hưởng cái kia
+     → Kiểm tra log riêng: docker compose logs backend | grep "ZK-PUSH\|ZK-PULL"
+
+
+  FILES ĐÃ THÊM/SỬA (commit 67e2f65)
+  ─────────────────────────────────────
+
+  ✅ backend/attendance/management/commands/run_zk_pull.py  (MỚI)
+     → Django management command: periodic pull mỗi 60s
+     → Dùng ZKBinaryService.get_all_attendance() qua pyzk
+     → get_or_create với (user_id, timestamp) — không tạo duplicate
+     → Hỗ trợ --once flag để test/sync thủ công
+     → Push WebSocket khi có bản ghi mới
+
+  ✅ backend/entrypoint.sh  (SỬA)
+     → Thêm: python manage.py run_zk_pull --interval 60 & (background)
+     → Chạy song song với run_zk_push và Daphne
+
+  CÁC FILE LIÊN QUAN (không thay đổi):
+     backend/attendance/zk_service.py      → ZKBinaryService.get_all_attendance()
+     backend/attendance/views.py           → SyncAttendanceView (manual sync API)
+     backend/config/settings.py            → ZK_DEVICE_IP, ZK_DEVICE_PORT, ZK_PROTOCOL
+     backend/requirements.txt              → pyzk==0.9
