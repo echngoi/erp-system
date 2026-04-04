@@ -101,22 +101,24 @@ export default function DeviceSettings() {
 
   const isOnline = device?.status === 'connected';
   const isAdms   = protocol?.protocol === 'adms' || device?.status === 'adms_mode';
+  const isZkTcp  = device?.push_type === 'zk_tcp';
 
   return (
     <Space direction="vertical" size="large" style={{ width: '100%' }}>
       <Title level={3}>Cài đặt & Thiết bị</Title>
 
-      {/* ADMS Setup Guide */}
+      {/* Connection Setup Guide */}
       {isAdms && (
         <Alert
           type="info"
           icon={<CloudServerOutlined />}
           showIcon
-          message="Chế độ ADMS (Push Mode)"
+          message={isZkTcp ? 'Chế độ ZK Push TCP (Binary)' : 'Chế độ ADMS (Push Mode)'}
           description={
             <Space direction="vertical" size="small" style={{ marginTop: 4 }}>
               <Text>
-                Máy chấm công đang dùng chế độ ADMS — máy <Text strong>tự đẩy</Text> dữ liệu chấm công về server.
+                Máy chấm công <Text strong>tự đẩy</Text> dữ liệu chấm công về server
+                {isZkTcp ? ' qua ZK Binary TCP.' : ' qua ADMS HTTP/WebSocket.'}
               </Text>
               <Text strong>Cấu hình trên máy chấm công:</Text>
               <Text>
@@ -127,7 +129,7 @@ export default function DeviceSettings() {
                   <Text copyable code>{protocol?.server_ip || 'IP_CỦA_MÁY_TÍNH'}</Text>
                 </Descriptions.Item>
                 <Descriptions.Item label="Port">
-                  <Text copyable code>{window.location.hostname === 'localhost' ? '8000' : '80'}</Text>
+                  <Text copyable code>{isZkTcp ? (protocol?.zk_push_port || '7005') : (window.location.hostname === 'localhost' ? '8000' : '80')}</Text>
                 </Descriptions.Item>
               </Descriptions>
               <Text type="secondary">
@@ -150,7 +152,7 @@ export default function DeviceSettings() {
                 icon={isOnline ? <CheckCircleOutlined /> : isAdms ? <CloudServerOutlined /> : <CloseCircleOutlined />}
                 color={isOnline ? 'success' : isAdms ? 'processing' : 'error'}
               >
-                {isOnline ? 'Online' : isAdms ? 'ADMS chờ kết nối' : 'Mất kết nối'}
+                {isOnline ? 'Online' : isAdms ? 'Chờ kết nối' : 'Mất kết nối'}
               </Tag>
             }
           >
@@ -167,7 +169,7 @@ export default function DeviceSettings() {
               <Alert
                 type="success"
                 message="Thiết bị đang kết nối và push dữ liệu"
-                description={`${device?.device_name || 'Máy chấm công'} (${device?.device_ip}) đang online qua WebSocket.`}
+                description={`${device?.device_name || 'Máy chấm công'} (${device?.device_ip}) đang online qua ${isZkTcp ? 'ZK Push TCP' : 'WebSocket'}.`}
                 showIcon
                 style={{ marginBottom: 16 }}
               />
@@ -184,8 +186,8 @@ export default function DeviceSettings() {
             <Descriptions bordered column={1} size="small">
               <Descriptions.Item label="Model">Ronald Jack AI06F</Descriptions.Item>
               <Descriptions.Item label="Giao thức">
-                <Tag color={isAdms ? 'blue' : 'green'}>
-                  {isAdms ? 'ADMS Push (WebSocket)' : 'ZKTeco Binary (pyzk)'}
+                <Tag color={isZkTcp ? 'green' : isAdms ? 'blue' : 'green'}>
+                  {device?.protocol || (isZkTcp ? 'ZK Push TCP (Binary)' : isAdms ? 'ADMS Push (WebSocket)' : 'ZKTeco Binary (pyzk)')}
                 </Tag>
               </Descriptions.Item>
               <Descriptions.Item label="Địa chỉ IP">

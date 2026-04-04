@@ -595,7 +595,7 @@ class ZKPushClientHandler:
 def _sync_record_contact(sn, ip):
     """Record device contact (sync, for thread pool)."""
     from attendance.zk_service import adms_record_contact
-    adms_record_contact(sn, ip=ip)
+    adms_record_contact(sn, ip=ip, push_type='zk_tcp')
 
 
 def _sync_save_attendance(records, sn):

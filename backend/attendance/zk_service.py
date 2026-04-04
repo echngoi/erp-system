@@ -180,6 +180,7 @@ def _save_registry_to_file():
                 'last_seen': entry['last_seen'].isoformat(),
                 'ip': entry.get('ip'),
                 'sn': entry.get('sn'),
+                'push_type': entry.get('push_type'),
             }
         with open(_ADMS_CONTACT_FILE, 'w') as f:
             json.dump(data, f)
@@ -200,7 +201,7 @@ def _load_registry_from_file():
         pass
 
 
-def adms_record_contact(sn, ip=None, devinfo=None):
+def adms_record_contact(sn, ip=None, devinfo=None, push_type=None):
     """Ghi nhận máy chấm công vừa liên lạc (bỏ qua healthcheck)."""
     if sn in _ADMS_IGNORED_SNS:
         return
@@ -210,6 +211,8 @@ def adms_record_contact(sn, ip=None, devinfo=None):
         'ip': ip,
         'sn': sn,
     })
+    if push_type:
+        entry['push_type'] = push_type  # 'zk_tcp' hoặc 'adms_ws'
     if devinfo and isinstance(devinfo, dict):
         entry['devinfo'] = devinfo
     _adms_device_registry[sn] = entry
@@ -288,15 +291,7 @@ class ADMSService:
         self.port = settings.ZK_DEVICE_PORT
 
     def test_connection(self):
-        # Kiểm tra TCP reachable
-        try:
-            s = socket.create_connection((self.ip, self.port), timeout=4)
-            s.close()
-            reachable = True
-        except Exception:
-            reachable = False
-
-        # Kiểm tra máy có liên lạc gần đây không
+        # Kiểm tra máy có liên lạc gần đây không (từ ZK Push TCP hoặc ADMS WS)
         contact = adms_get_last_contact()
         if contact:
             elapsed = (datetime.now() - contact['last_seen']).total_seconds()
@@ -306,12 +301,21 @@ class ADMSService:
             elapsed = None
 
         devinfo = contact.get('devinfo', {}) if contact else {}
+        push_type = contact.get('push_type', 'adms_ws') if contact else None
+
+        # Map push_type sang tên giao thức hiển thị
+        if push_type == 'zk_tcp':
+            protocol_label = 'ZK Push TCP (Binary)'
+            protocol_note = 'Máy đẩy dữ liệu qua ZK Binary TCP → port 7005 trên server.'
+        else:
+            protocol_label = 'ADMS Push (WebSocket)'
+            protocol_note = 'Máy đẩy dữ liệu qua ADMS HTTP/WebSocket.'
 
         result = {
             'status': 'connected' if is_online else 'waiting',
-            'protocol': 'ADMS Push (WebSocket)',
+            'protocol': protocol_label,
+            'push_type': push_type or 'unknown',
             'ip': self.ip, 'port': self.port,
-            'device_reachable': reachable,
             'device_name': devinfo.get('modelname', 'Ronald Jack AI06F'),
             'serial_number': contact['sn'] if contact else None,
             'device_ip': contact.get('ip') if contact else None,
@@ -319,10 +323,10 @@ class ADMSService:
             'last_push': contact['last_seen'].strftime('%Y-%m-%d %H:%M:%S') if contact else None,
             'last_push_seconds_ago': int(elapsed) if elapsed is not None else None,
             'note': (
-                'Máy đang hoạt động, dữ liệu được đẩy qua ADMS.'
+                f'Máy đang hoạt động. {protocol_note}'
                 if is_online else
                 'Đang chờ máy chấm công kết nối. '
-                'Kiểm tra cấu hình Cloud Server trên máy → IP server = IP máy tính, Port = 8000.'
+                'Máy cần cấu hình Server IP → IP WAN của VPS, Port → 7005 (ZK Push TCP).'
             ),
         }
 

@@ -466,25 +466,34 @@ class DeviceProtocolView(APIView):
     permission_classes = [IsAdmin]
 
     def get(self, request):
-        from .zk_service import ADMSService, ZKBinaryService
+        from .zk_service import ADMSService, ZKBinaryService, adms_get_last_contact
+
         proto = 'adms' if isinstance(zk_service, ADMSService) else 'binary'
 
         # Lấy IP server thực tế từ request
         server_host = request.get_host().split(':')[0]
         server_port = request.get_port() if hasattr(request, 'get_port') else '8000'
 
+        # Kiểm tra push_type thực tế
+        contact = adms_get_last_contact()
+        push_type = contact.get('push_type', 'adms_ws') if contact else None
+        is_zk_tcp = push_type == 'zk_tcp'
+
         return Response({
             'protocol': proto,
+            'push_type': push_type,
             'device_ip': zk_service.ip,
             'device_port': zk_service.port,
             'server_ip': server_host,
+            'zk_push_port': 7005,
             'adms_push_url': f'http://{server_host}:{server_port}/iclock/cdata',
             'instructions': (
-                'ADMS mode: Vào máy chấm công → Menu → Comm. → Cloud Server Setting → '
+                f'Máy đang kết nối qua ZK Push TCP (port 7005). '
+                f'Cấu hình trên máy: Comm. → Cloud Server → IP={server_host}, Port=7005.'
+                if is_zk_tcp else
+                f'ADMS mode: Vào máy chấm công → Menu → Comm. → Cloud Server Setting → '
                 f'đặt Domain/IP = {server_host}, Port = {server_port}. '
-                'Máy sẽ tự đẩy dữ liệu chấm công về server.'
-                if proto == 'adms'
-                else 'Binary mode: Django kết nối thẳng ra máy qua pyzk.'
+                f'Máy sẽ tự đẩy dữ liệu chấm công về server.'
             ),
         })
 
