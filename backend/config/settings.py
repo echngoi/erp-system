@@ -81,7 +81,7 @@ CORS_ALLOWED_ORIGINS = [
     'http://localhost:5174',
     'http://127.0.0.1:5174',
     'http://192.168.1.46:5174',
-    'https://erp-system-nine-zeta.vercel.app/'
+    'https://erp-system-nine-zeta.vercel.app'
 ]
 
 TEMPLATES = [

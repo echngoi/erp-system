@@ -200,6 +200,24 @@ class ZKPushClientHandler:
         if self.registered:
             _device_last_ack_time[ip] = now
 
+            # ── SEND ACK IMMEDIATELY — before any DB ops ─────────────────
+            # Critical: device disconnects ~20ms after sending punch packet.
+            # If we do DB save first, the ACK arrives after device disconnects,
+            # so device never clears its notification → replays forever.
+            ack = bytearray(16)
+            ack[0:2] = b'\x5a\xa5'
+            ack[2:4] = raw[2:4]
+            ack[4] = raw[4]                   # ECHO seq (not +1) for heartbeat
+            ack[5] = raw[5]
+            ack[6:8] = raw[6:8]
+            ack[8:12] = raw[8:12]
+            ack[12] = 0x32
+            ack[13] = 0x01
+            ack[14] = sum(ack[0:14]) & 0xFF
+            ack[15] = raw[15]
+
+            await self._send(bytes(ack))
+
             # Decode session and flags for event detection
             session_val = struct.unpack_from('<I', raw, 8)[0]  # uint32 LE
             byte12 = raw[12]
@@ -229,19 +247,6 @@ class ZKPushClientHandler:
                 self._last_contact_write = now
                 await self._record_device_contact()
 
-            ack = bytearray(16)
-            ack[0:2] = b'\x5a\xa5'
-            ack[2:4] = raw[2:4]
-            ack[4] = raw[4]                   # ECHO seq (not +1) for heartbeat
-            ack[5] = raw[5]
-            ack[6:8] = raw[6:8]
-            ack[8:12] = raw[8:12]
-            ack[12] = 0x32
-            ack[13] = 0x01
-            ack[14] = sum(ack[0:14]) & 0xFF
-            ack[15] = raw[15]
-
-            await self._send(bytes(ack))
             return
 
         # ── CASE 2: First REGISTER on new connection — rate limit ─────────
@@ -309,15 +314,15 @@ class ZKPushClientHandler:
 
         # ── Dedup 1: Exact same raw bytes = replay of cached notification ────
         if _last_punch_raw.get(serial_number) == raw_bytes:
-            logger.debug(f"[ZK-TCP] Replay punch (same raw) from SN={serial_number} "
-                         f"user={user_id} — skipping")
+            logger.info(f"[ZK-TCP] Replay punch (same raw) from SN={serial_number} "
+                        f"user={user_id} — skipping")
             return
 
         # ── Dedup 2: Same user within cooldown window ────────────────────────
         last_time = _last_punch_time.get(user_id, 0)
         if (now - last_time) < PUNCH_DEDUP_WINDOW:
-            logger.debug(f"[ZK-TCP] Duplicate punch user={user_id} "
-                         f"within {PUNCH_DEDUP_WINDOW}s — skipping")
+            logger.info(f"[ZK-TCP] Duplicate punch user={user_id} "
+                        f"within {PUNCH_DEDUP_WINDOW}s — skipping")
             return
 
         # ── New punch event — save it ────────────────────────────────────────
