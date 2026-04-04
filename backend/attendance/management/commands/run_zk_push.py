@@ -34,6 +34,7 @@ from attendance.zk_push_protocol import (
     parse_packet, find_packets,
     build_register_ack, build_heartbeat_ack, build_data_ack, build_response,
     parse_attlog_payload, parse_attlog_text_in_binary,
+    parse_userinfo_payload,
     _compute_checksum, _apply_checksum,
 )
 
@@ -494,15 +495,29 @@ class ZKPushClientHandler:
                        f"new={len(new_records)}")
 
     async def _handle_userinfo(self, packet):
-        """Handle user info data push."""
+        """Handle user info data push — parse and save employee names."""
         logger.warning(f"[ZK-TCP] USERINFO from SN={self.serial_number} "
                        f"payload={len(packet.payload)}B")
         if packet.payload:
             logger.info(f"[ZK-TCP] USERINFO payload hex: {packet.payload[:160].hex()}")
 
-        # Send 16-byte ACK
+        # Send ACK first so device doesn't timeout
         ack = self._build_16byte_ack(packet.raw)
         await self._send(ack)
+
+        # Parse and save employee names
+        if packet.payload:
+            records = parse_userinfo_payload(packet.payload, self.serial_number)
+            if records:
+                loop = asyncio.get_event_loop()
+                saved = await loop.run_in_executor(
+                    None, _sync_save_employees, records, self.serial_number
+                )
+                logger.warning(f"[ZK-TCP] USERINFO: parsed={len(records)} "
+                               f"saved/updated={saved} employees")
+            else:
+                logger.warning(f"[ZK-TCP] USERINFO: could not parse payload "
+                               f"({len(packet.payload)}B) — see hex above")
 
     async def _handle_operlog(self, packet):
         """Handle operation log push."""
@@ -669,6 +684,40 @@ def _sync_save_attendance(records, sn):
         )
 
     return saved, new_records
+
+
+def _sync_save_employees(user_records, sn) -> int:
+    """Save/update Employee records from USERINFO push (sync, for thread pool)."""
+    from attendance.models import Employee, AttendanceLog
+
+    saved = 0
+    for rec in user_records:
+        try:
+            obj, created = Employee.objects.update_or_create(
+                user_id=rec.user_id,
+                defaults={
+                    'uid': rec.uid or 0,
+                    'name': rec.name,
+                    'privilege': rec.privilege,
+                    'card': rec.card,
+                },
+            )
+            saved += 1
+            action = 'Created' if created else 'Updated'
+            logger.info(f"[ZK-TCP] {action} employee: user_id={rec.user_id} "
+                        f"name={rec.name!r}")
+
+            # Link any orphan AttendanceLogs that already have this user_id
+            linked = AttendanceLog.objects.filter(
+                user_id=rec.user_id, employee__isnull=True
+            ).update(employee=obj)
+            if linked:
+                logger.info(f"[ZK-TCP] Linked {linked} orphan AttendanceLogs "
+                            f"to employee user_id={rec.user_id}")
+        except Exception as e:
+            logger.warning(f"[ZK-TCP] Save employee error user_id={rec.user_id}: {e}")
+
+    return saved
 
 
 # ── Server ─────────────────────────────────────────────────────────────────────

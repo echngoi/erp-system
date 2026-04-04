@@ -117,6 +117,16 @@ class AttendanceRecord:
     verify_mode: int = 0
 
 
+@dataclass
+class UserRecord:
+    """Parsed user record from USERINFO push payload."""
+    uid: int          # Internal device UID (integer)
+    user_id: str      # User ID string on device (e.g. "13", "80")
+    name: str         # Display name
+    privilege: int = 0
+    card: int = 0
+
+
 # ── Packet Parsing ─────────────────────────────────────────────────────────────
 
 def find_packets(data: bytes) -> List[tuple]:
@@ -438,3 +448,179 @@ def _records_look_valid(records: List[AttendanceRecord]) -> bool:
         return False
     valid = sum(1 for r in records if r.timestamp and _is_valid_timestamp(r.timestamp))
     return valid >= len(records) * 0.5  # At least 50% should have valid timestamps
+
+
+# ── User Info Parsing ──────────────────────────────────────────────────────────
+
+def parse_userinfo_payload(payload: bytes, sn: str = '') -> List[UserRecord]:
+    """Parse user records from CMD_PUSH_USERINFO (0x0007) payload.
+
+    The device pushes this packet on each connection, containing all enrolled
+    users with their UID, user_id string, and display name.
+
+    Tries formats in order:
+    1. Text/tab-separated (most common in ZK Push ADMS-family)
+    2. Binary 48-byte records (ZKTeco standard)
+    3. Binary 72-byte records (newer firmware)
+    4. Binary 56-byte records
+    """
+    if not payload:
+        return []
+
+    # ── Format 1: Text lines (tab or comma separated) ────────────────────────
+    records = _parse_userinfo_text(payload, sn)
+    if records:
+        return records
+
+    # ── Format 2: Binary 48-byte records ─────────────────────────────────────
+    if len(payload) >= 48 and len(payload) % 48 == 0:
+        records = _parse_userinfo_binary(payload, sn, record_size=48,
+                                         uid_size=2, userid_size=9, name_size=24,
+                                         pass_size=8, card_offset=43)
+        if records:
+            logger.info(f"[ZK-PUSH] Parsed {len(records)} USERINFO records "
+                        f"(format=48B) from SN={sn}")
+            return records
+
+    # ── Format 3: Binary 72-byte records ─────────────────────────────────────
+    if len(payload) >= 72 and len(payload) % 72 == 0:
+        records = _parse_userinfo_binary(payload, sn, record_size=72,
+                                         uid_size=2, userid_size=9, name_size=24,
+                                         pass_size=8, card_offset=43)
+        if records:
+            logger.info(f"[ZK-PUSH] Parsed {len(records)} USERINFO records "
+                        f"(format=72B) from SN={sn}")
+            return records
+
+    # ── Format 4: Binary 56-byte records ─────────────────────────────────────
+    if len(payload) >= 56 and len(payload) % 56 == 0:
+        records = _parse_userinfo_binary(payload, sn, record_size=56,
+                                         uid_size=2, userid_size=9, name_size=24,
+                                         pass_size=8, card_offset=43)
+        if records:
+            logger.info(f"[ZK-PUSH] Parsed {len(records)} USERINFO records "
+                        f"(format=56B) from SN={sn}")
+            return records
+
+    logger.warning(f"[ZK-PUSH] Could not parse USERINFO payload "
+                   f"({len(payload)} bytes) from SN={sn}")
+    logger.warning(f"[ZK-PUSH] USERINFO hex: {payload[:120].hex()}")
+    return []
+
+
+def _parse_userinfo_text(payload: bytes, sn: str = '') -> List[UserRecord]:
+    """Parse tab-separated or space-separated user records embedded in payload.
+
+    Common ZK Push text format (one user per line):
+      <uid>\\t<user_id>\\t<name>\\t<password>\\t<card>\\t<privilege>\\n
+
+    Some devices omit uid or password fields.
+    """
+    records = []
+    try:
+        # Try UTF-8 first, then GBK (Chinese encoding used by ZKTeco)
+        for encoding in ('utf-8', 'gbk', 'latin-1'):
+            try:
+                text = payload.decode(encoding, errors='strict')
+                break
+            except (UnicodeDecodeError, LookupError):
+                continue
+        else:
+            text = payload.decode('utf-8', errors='ignore')
+
+        for line in text.splitlines():
+            line = line.strip('\r\n\t\x00 ')
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) < 2:
+                parts = line.split(',')
+            if len(parts) < 2:
+                continue
+            try:
+                # Try: uid, user_id, name, [password, card, privilege]
+                if len(parts) >= 3:
+                    uid = int(parts[0].strip())
+                    user_id = parts[1].strip()
+                    name = parts[2].strip()
+                    privilege = int(parts[5].strip()) if len(parts) > 5 else 0
+                    card = int(parts[4].strip()) if len(parts) > 4 else 0
+                else:
+                    # Minimal: user_id, name
+                    uid = 0
+                    user_id = parts[0].strip()
+                    name = parts[1].strip()
+                    privilege = 0
+                    card = 0
+
+                if user_id and name:
+                    records.append(UserRecord(
+                        uid=uid,
+                        user_id=user_id,
+                        name=name,
+                        privilege=privilege,
+                        card=card,
+                    ))
+            except (ValueError, IndexError):
+                continue
+    except Exception:
+        pass
+
+    if records:
+        logger.info(f"[ZK-PUSH] Parsed {len(records)} USERINFO records "
+                    f"(text format) from SN={sn}")
+    return records
+
+
+def _parse_userinfo_binary(payload: bytes, sn: str, record_size: int,
+                            uid_size: int, userid_size: int, name_size: int,
+                            pass_size: int, card_offset: int) -> List[UserRecord]:
+    """Parse fixed-size binary user records.
+
+    Layout (offsets from record start):
+      0            : uid (uint16 or uint32 LE)
+      uid_size     : user_id (null-padded ASCII)
+      uid+userid   : name (null-padded, may be GBK)
+      ...
+      card_offset  : card (uint32 LE)
+      card_offset+4: privilege (uint8)
+    """
+    records = []
+    uid_fmt = '<H' if uid_size == 2 else '<I'
+
+    for i in range(0, len(payload), record_size):
+        chunk = payload[i:i + record_size]
+        if len(chunk) < record_size:
+            break
+        try:
+            uid = struct.unpack_from(uid_fmt, chunk, 0)[0]
+            user_id_raw = chunk[uid_size:uid_size + userid_size].split(b'\x00')[0]
+            user_id = user_id_raw.decode('ascii', errors='replace').strip()
+
+            name_start = uid_size + userid_size
+            name_raw = chunk[name_start:name_start + name_size].split(b'\x00')[0]
+            # Try GBK (ZKTeco Chinese) then UTF-8
+            for enc in ('gbk', 'utf-8', 'latin-1'):
+                try:
+                    name = name_raw.decode(enc, errors='strict').strip()
+                    break
+                except (UnicodeDecodeError, LookupError):
+                    continue
+            else:
+                name = name_raw.decode('utf-8', errors='replace').strip()
+
+            card = struct.unpack_from('<I', chunk, card_offset)[0] if card_offset + 4 <= record_size else 0
+            privilege = chunk[card_offset + 4] if card_offset + 5 <= record_size else 0
+
+            if user_id or uid:
+                records.append(UserRecord(
+                    uid=uid,
+                    user_id=user_id or str(uid),
+                    name=name,
+                    privilege=privilege,
+                    card=card,
+                ))
+        except Exception:
+            continue
+
+    return records
