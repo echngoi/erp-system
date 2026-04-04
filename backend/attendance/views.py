@@ -143,6 +143,65 @@ class SyncUsersView(APIView):
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
+class BatchCreateEmployeesView(APIView):
+    """Batch create/update employees from device user list.
+
+    Used by deploy/sync_users_from_device.py to upload users pulled
+    from the device via pyzk (LAN connection).
+    """
+    permission_classes = [IsAdmin]
+
+    def post(self, request):
+        users = request.data.get('users', [])
+        if not users:
+            return Response({'error': 'No users provided'},
+                            status=status.HTTP_400_BAD_REQUEST)
+
+        created = 0
+        updated = 0
+        errors = []
+        for u in users:
+            try:
+                uid = u.get('uid')
+                user_id = str(u.get('user_id', ''))
+                name = u.get('name', '') or f"User {user_id}"
+
+                if not user_id:
+                    errors.append(f"Missing user_id in: {u}")
+                    continue
+
+                obj, is_new = Employee.objects.update_or_create(
+                    uid=uid,
+                    defaults={
+                        'user_id': user_id,
+                        'name': name,
+                        'privilege': u.get('privilege', 0),
+                        'group_id': str(u.get('group_id', '') or ''),
+                        'card': u.get('card', 0) or 0,
+                    }
+                )
+                # Also update existing AttendanceLog records that have this user_id
+                # but no employee FK set
+                AttendanceLog.objects.filter(
+                    user_id=user_id, employee__isnull=True
+                ).update(employee=obj)
+
+                if is_new:
+                    created += 1
+                else:
+                    updated += 1
+            except Exception as e:
+                errors.append(f"Error for uid={u.get('uid')}: {e}")
+
+        return Response({
+            'message': f'Đồng bộ thành công: {created} mới, {updated} cập nhật',
+            'created': created,
+            'updated': updated,
+            'total': len(users),
+            'errors': errors[:10],  # limit error output
+        })
+
+
 class SyncAttendanceView(APIView):
     """Pull attendance records from device."""
     permission_classes = [IsAdmin]

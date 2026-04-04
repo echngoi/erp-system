@@ -52,6 +52,14 @@ _device_rapid_count = {}      # IP → count of suppressed rapid reconnects
 
 RAPID_RECONNECT_THRESHOLD = 2.0  # seconds — below this = rapid reconnect
 
+# ── Punch event deduplication ─────────────────────────────────────────────────
+# The device replays its cached punch notification every connection cycle (~10s)
+# because on WAN it disconnects before completing the full punch→data-ready→clear
+# conversation. We deduplicate by tracking raw packet bytes per device SN.
+_last_punch_raw = {}          # SN → raw bytes of last punch notification
+_last_punch_time = {}         # user_id → time.time() of last saved punch
+PUNCH_DEDUP_WINDOW = 60       # seconds — ignore same user punch within this window
+
 
 class ZKPushClientHandler:
     """Handles a single TCP connection from an attendance machine."""
@@ -205,8 +213,8 @@ class ZKPushClientHandler:
                                f"session=0x{session_val:X} ({session_val}) "
                                f"byte12={byte12} byte13={byte13} "
                                f"raw={raw.hex()}")
-                # Save attendance record!
-                await self._handle_punch_event(packet.serial_number, session_val)
+                # Save attendance record (with dedup against replays)
+                await self._handle_punch_event(packet.serial_number, session_val, raw)
 
             # ── DATA READY: byte12=0x01 means device has pending data ─────
             elif byte12 == 0x01:
@@ -284,20 +292,41 @@ class ZKPushClientHandler:
         logger.info(f"[ZK-TCP] Sending REGISTER ACK (16B): {ack_bytes.hex()}")
         await self._send(ack_bytes)
 
-    async def _handle_punch_event(self, serial_number, session_val):
+    async def _handle_punch_event(self, serial_number, session_val, raw_bytes):
         """Handle attendance punch event embedded in heartbeat REGISTER.
 
         The device signals a new punch via session bytes != 0 in a heartbeat
         REGISTER packet. session_val = user_id on the device (uint32 LE).
 
-        Verified from captures:
-        - Mita Pro proxy: session=0x1e (30) when user punched
-        - VPS logs: session=0x78 (120) when user punched
+        On WAN, the device replays the same cached notification every connection
+        cycle (~10s) because it disconnects before completing the full
+        punch→data-ready→clear conversation. We deduplicate by:
+        1. Checking raw packet bytes (exact replay = skip)
+        2. Checking time window (same user within 60s = skip)
         """
+        user_id = str(session_val)
+        now = time.time()
+
+        # ── Dedup 1: Exact same raw bytes = replay of cached notification ────
+        if _last_punch_raw.get(serial_number) == raw_bytes:
+            logger.debug(f"[ZK-TCP] Replay punch (same raw) from SN={serial_number} "
+                         f"user={user_id} — skipping")
+            return
+
+        # ── Dedup 2: Same user within cooldown window ────────────────────────
+        last_time = _last_punch_time.get(user_id, 0)
+        if (now - last_time) < PUNCH_DEDUP_WINDOW:
+            logger.debug(f"[ZK-TCP] Duplicate punch user={user_id} "
+                         f"within {PUNCH_DEDUP_WINDOW}s — skipping")
+            return
+
+        # ── New punch event — save it ────────────────────────────────────────
+        _last_punch_raw[serial_number] = raw_bytes
+        _last_punch_time[user_id] = now
+
         from attendance.zk_push_protocol import AttendanceRecord
 
         ts = datetime.now()
-        user_id = str(session_val)
 
         logger.warning(f"[ZK-TCP] ★ Saving punch: user_id={user_id} "
                        f"time={ts.strftime('%Y-%m-%d %H:%M:%S')} "

@@ -18,6 +18,7 @@ urlpatterns = [
     path('employees/',               views.EmployeeListView.as_view(),        name='employee-list'),
     path('employees/<int:pk>/active/', views.EmployeeToggleActiveView.as_view(), name='employee-toggle-active'),
     path('employees/bulk-active/',       views.EmployeeBulkToggleActiveView.as_view(), name='employee-bulk-toggle-active'),
+    path('employees/batch-create/',      views.BatchCreateEmployeesView.as_view(),     name='employee-batch-create'),
     path('employees/assign-shift/',      views.EmployeeAssignShiftView.as_view(),      name='employee-assign-shift'),
     path('attendance/',       views.AttendanceListView.as_view(), name='attendance-list'),
     path('attendance/live/',  views.LiveAttendanceView.as_view(), name='attendance-live'),
