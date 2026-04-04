@@ -1705,43 +1705,101 @@ TÓM TẮT NHANH — CHỈ CẦN 5 LỆNH
   BƯỚC 1 — MIKROTIK: THÊM NAT PORT FORWARDING
   ─────────────────────────────────────────────
 
-  Mở WinBox → đăng nhập router 192.168.1.1
-  Vào: New Terminal (menu trái)
+  ★ ĐÂY LÀ BƯỚC CẦN LÀM NGAY — VPS đã sẵn sàng, chỉ còn chờ MikroTik ★
 
-  Chạy lệnh sau trong terminal MikroTik:
+  Trạng thái hiện tại (từ log VPS 15:06:51):
+    [ZK-PULL] Cannot connect to device:
+              ZK binary connect failed: can't reach device (ping 113.160.150.125)
+  → Port 4370 chưa được forward → VPS không kết nối được tới máy CC
 
-    /ip firewall nat add \
-      chain=dstnat \
-      dst-address=113.160.150.125 \
-      protocol=tcp \
-      dst-port=4370 \
-      action=dst-nat \
-      to-addresses=192.168.1.225 \
-      to-ports=4370 \
-      comment="ZK attendance machine port 4370"
+  ═══════════════════════════════════════════════════════════════
+  CÁCH A — DÙNG TERMINAL WINBOX (nhanh nhất, 1 lệnh)
+  ═══════════════════════════════════════════════════════════════
 
-  Xác nhận rule đã được tạo:
+  1. Mở WinBox → đăng nhập router 192.168.1.1
+  2. Click "New Terminal" ở menu bên trái
+  3. Dán và chạy lệnh sau (1 dòng duy nhất):
 
-    /ip firewall nat print
+  /ip firewall nat add chain=dstnat dst-address=113.160.150.125 protocol=tcp dst-port=4370 action=dst-nat to-addresses=192.168.1.225 to-ports=4370 comment="ZK attendance port 4370"
 
-  → Phải thấy rule mới xuất hiện với:
+  4. Xác nhận rule đã tạo thành công:
+
+  /ip firewall nat print
+
+  → Phải thấy xuất hiện dòng mới có:
+      chain=dstnat
+      dst-address=113.160.150.125
       dst-port=4370
+      action=dst-nat
       to-addresses=192.168.1.225
       to-ports=4370
+
+  ═══════════════════════════════════════════════════════════════
+  CÁCH B — DÙNG GUI WINBOX (nếu không quen terminal)
+  ═══════════════════════════════════════════════════════════════
+
+  1. Mở WinBox → đăng nhập router 192.168.1.1
+
+  2. Vào: IP → Firewall → tab NAT
+
+  3. Click nút [New] (dấu + màu xanh, góc trên trái)
+     → Hộp thoại "New NAT Rule" hiện ra
+
+  4. Tab GENERAL — điền các trường sau:
+
+     ┌──────────────────────┬───────────────────────────────┐
+     │ Chain                │ dstnat                        │
+     │ Protocol             │ 6 (tcp)                       │
+     │ Dst. Address         │ 113.160.150.125               │
+     │ Dst. Port            │ 4370                          │
+     │ In. Interface        │ (để trống)                    │
+     └──────────────────────┴───────────────────────────────┘
+
+  5. Tab ACTION — điền:
+
+     ┌──────────────────────┬───────────────────────────────┐
+     │ Action               │ dst-nat                       │
+     │ To Addresses         │ 192.168.1.225                 │
+     │ To Ports             │ 4370                          │
+     └──────────────────────┴───────────────────────────────┘
+
+  6. Tab GENERAL (quay lại) — thêm Comment (tùy chọn):
+     Comment: ZK attendance port 4370
+
+  7. Click [OK] để lưu
+
+  8. Kiểm tra: rule mới xuất hiện trong danh sách NAT
+     → Bên cạnh các rule hiện có:
+         #0  dstnat  113.160.150.125  tcp:8088  (may chu hoadon)
+         #1  dstnat  113.160.150.125  tcp:8090  (tra cuu hoa don)
+         #5  dstnat  113.160.150.125  tcp:22    (SSH)
+         #6  dstnat  113.160.150.125  tcp:4370  ← RULE MỚI
+
+  ═══════════════════════════════════════════════════════════════
+  XÁC NHẬN PORT FORWARDING HOẠT ĐỘNG
+  ═══════════════════════════════════════════════════════════════
+
+  Sau khi thêm rule (Cách A hoặc B), test ngay trên VPS:
+
+    ssh root@123.30.48.72
+    docker compose exec backend python manage.py run_zk_pull --once
+
+  LOG THÀNH CÔNG:
+    [ZK-PULL] One-time pull from 113.160.150.125:4370...
+    [ZK-PULL] ✓ Saved XX new records (device total: XX)
+    [ZK-PULL] Done. XX new records saved.
+
+  LOG NẾU VẪN LỖI:
+    [ZK-PULL] Cannot connect to device: can't reach device (ping 113.160.150.125)
+    → Kiểm tra lại rule trong WinBox: IP → Firewall → NAT
+    → Đảm bảo rule KHÔNG bị Disable (dấu X đỏ)
+    → Đảm bảo Dst. Address = 113.160.150.125 (đúng IP WAN)
 
   LƯU Ý VỀ RULE HIỆN CÓ (tham chiếu từ màn hình WinBox):
     #0 dstnat → 113.160.150.125 tcp:8088   (may chu hoadon)
     #1 dstnat → 113.160.150.125 tcp:8090   (tra cuu hoa don)
     #5 dstnat → 113.160.150.125 tcp:22     (SSH)
     → Rule mới (port 4370) sẽ thêm vào danh sách này
-
-  KIỂM TRA PORT FORWARDING (từ bên ngoài mạng LAN):
-
-    Từ VPS hoặc máy khác ngoài internet:
-    nc -zv 113.160.150.125 4370
-
-    → Nếu "Connected": port forwarding hoạt động đúng
-    → Nếu "Connection refused" hoặc timeout: kiểm tra lại rule MikroTik
 
 
   BƯỚC 2 — VPS: CẬP NHẬT .ENV.PRODUCTION
