@@ -66,6 +66,19 @@ _last_saved_session = {}      # SN → (session_val, save_timestamp)
 PUNCH_DEDUP_WINDOW = 60       # seconds — in-memory flood control
 PUNCH_SAME_USER_HOURS = 4     # hours — re-save same session after this long
 
+# ── Log-spam throttle (firmware replay loop generates ~10 conn/s) ─────────────
+_last_spam_log_time = {}      # log_key → time.time() of last log
+LOG_SPAM_INTERVAL = 30        # seconds — only log repeated messages once per interval
+
+
+def _should_log(key) -> bool:
+    """Return True (and update timer) if this log key hasn't fired in LOG_SPAM_INTERVAL."""
+    now = time.time()
+    if (now - _last_spam_log_time.get(key, 0)) >= LOG_SPAM_INTERVAL:
+        _last_spam_log_time[key] = now
+        return True
+    return False
+
 
 class ZKPushClientHandler:
     """Handles a single TCP connection from an attendance machine."""
@@ -82,7 +95,8 @@ class ZKPushClientHandler:
     async def handle(self):
         """Main connection handler loop."""
         ip = self.addr[0] if self.addr else 'unknown'
-        logger.warning(f"[ZK-TCP] New connection from {ip}")
+        if _should_log((ip, 'new_conn')):
+            logger.warning(f"[ZK-TCP] New connection from {ip}")
 
         try:
             while True:
@@ -96,14 +110,14 @@ class ZKPushClientHandler:
                     break
 
                 if not data:
-                    logger.info(f"[ZK-TCP] Connection closed by {ip} (SN={self.serial_number})")
+                    logger.debug(f"[ZK-TCP] Connection closed by {ip} (SN={self.serial_number})")
                     break
 
                 self._buffer += data
                 await self._process_buffer()
 
         except ConnectionResetError:
-            logger.warning(f"[ZK-TCP] Connection reset by {ip} (SN={self.serial_number})")
+            logger.debug(f"[ZK-TCP] Connection reset by {ip} (SN={self.serial_number})")
         except Exception as e:
             logger.error(f"[ZK-TCP] Error handling {ip} (SN={self.serial_number}): {e}",
                          exc_info=True)
@@ -113,7 +127,8 @@ class ZKPushClientHandler:
                 await self.writer.wait_closed()
             except Exception:
                 pass
-            logger.warning(f"[ZK-TCP] Disconnected: {ip} (SN={self.serial_number})")
+            if _should_log((ip, 'disconnected')):
+                logger.warning(f"[ZK-TCP] Disconnected: {ip} (SN={self.serial_number})")
 
     async def _process_buffer(self):
         """Process all complete packets in the buffer."""
@@ -236,17 +251,19 @@ class ZKPushClientHandler:
 
             ack_bytes = bytes(ack)
             if session_val != 0:
-                logger.info(f"[ZK-TCP] Sending PUNCH ACK (session cleared): {ack_bytes.hex()}")
+                if _should_log((self.serial_number, session_val, 'punch_ack')):
+                    logger.info(f"[ZK-TCP] Sending PUNCH ACK (session cleared): {ack_bytes.hex()}")
             await self._send(ack_bytes)
 
             # ── PUNCH EVENT: session != 0 means attendance event ──────────
             # From proxy capture: Mita Pro session=0x1e when punch, VPS session=0x78
             # session value = user_id who just punched (uint32 LE)
             if session_val != 0:
-                logger.warning(f"[ZK-TCP] ★★ PUNCH EVENT from SN={packet.serial_number} "
-                               f"session=0x{session_val:X} ({session_val}) "
-                               f"byte12={byte12} byte13={byte13} "
-                               f"raw={raw.hex()}")
+                if _should_log((self.serial_number, session_val, 'punch_event')):
+                    logger.warning(f"[ZK-TCP] ★★ PUNCH EVENT from SN={packet.serial_number} "
+                                   f"session=0x{session_val:X} ({session_val}) "
+                                   f"byte12={byte12} byte13={byte13} "
+                                   f"raw={raw.hex()}")
                 # Save attendance record (with dedup against replays)
                 await self._handle_punch_event(packet.serial_number, session_val, raw)
 
@@ -278,10 +295,11 @@ class ZKPushClientHandler:
             session_val = struct.unpack_from('<I', raw, 8)[0]
             if session_val != 0:
                 # PUNCH on rapid reconnect — DO NOT suppress! Process it.
-                logger.warning(f"[ZK-TCP] ⚡ Rapid reconnect with PUNCH "
-                               f"session=0x{session_val:X} ({session_val}) from "
-                               f"SN={packet.serial_number} (gap={gap:.3f}s) "
-                               f"— processing (not suppressed)")
+                if _should_log((ip, session_val, 'rapid_punch')):
+                    logger.warning(f"[ZK-TCP] ⚡ Rapid reconnect with PUNCH "
+                                   f"session=0x{session_val:X} ({session_val}) from "
+                                   f"SN={packet.serial_number} (gap={gap:.3f}s) "
+                                   f"— processing (not suppressed)")
                 _device_rapid_count[ip] = 0
                 _device_last_ack_time[ip] = now
                 self.registered = True
@@ -301,12 +319,9 @@ class ZKPushClientHandler:
                 ack[15] = raw[15]
 
                 ack_bytes = bytes(ack)
-                logger.info(f"[ZK-TCP] Sending RAPID PUNCH ACK (session cleared): {ack_bytes.hex()}")
                 await self._send(ack_bytes)
 
                 # Handle the punch event (dedup will filter replays)
-                logger.warning(f"[ZK-TCP] ★★ PUNCH EVENT (rapid) from SN={packet.serial_number} "
-                               f"session=0x{session_val:X} ({session_val}) raw={raw.hex()}")
                 await self._handle_punch_event(packet.serial_number, session_val, raw)
                 return
 
@@ -383,8 +398,9 @@ class ZKPushClientHandler:
         # ── Layer 1: Flood control (60s) — prevents replay from hitting DB ───
         last_time = _last_punch_time.get(user_id, 0)
         if (now - last_time) < PUNCH_DEDUP_WINDOW:
-            logger.info(f"[ZK-TCP] Duplicate punch user={user_id} "
-                        f"within {PUNCH_DEDUP_WINDOW}s — skipping")
+            if _should_log((user_id, 'dedup')):
+                logger.info(f"[ZK-TCP] Duplicate punch user={user_id} "
+                            f"within {PUNCH_DEDUP_WINDOW}s — skipping (firmware replay loop)")
             return
 
         # Always update flood marker (even if we skip below)
@@ -397,8 +413,9 @@ class ZKPushClientHandler:
             if prev_session == session_val:
                 hours_since = (now - prev_save_time) / 3600
                 if hours_since < PUNCH_SAME_USER_HOURS:
-                    logger.info(f"[ZK-TCP] Replay: user={user_id} same session "
-                                f"({hours_since:.1f}h since save) — skipping")
+                    if _should_log((serial_number, session_val, 'replay')):
+                        logger.info(f"[ZK-TCP] Replay: user={user_id} same session "
+                                    f"({hours_since:.1f}h since save) — skipping")
                     return
                 else:
                     logger.warning(f"[ZK-TCP] Same user {user_id} re-punch after "
