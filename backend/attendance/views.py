@@ -5,6 +5,7 @@ import io
 import logging
 from collections import defaultdict
 from datetime import datetime, timedelta, time as dtime
+from django.conf import settings as django_settings
 from django.utils import timezone
 from django.http import HttpResponse
 from django.db.models import Count, Q, Min, Max
@@ -109,12 +110,30 @@ class DeviceCommandView(APIView):
 
 
 class SyncUsersView(APIView):
-    """Pull users from device and save to DB."""
+    """Pull users from device and save to DB.
+
+    Strategy:
+    1. Try pyzk direct connection (ZK binary on port 4370 via WAN)
+    2. Fallback: return existing employees from DB (ADMS mode)
+    """
     permission_classes = [IsAdmin]
 
     def post(self, request):
         try:
+            # First try direct pyzk connection (works if port 4370 is NAT-forwarded)
+            pyzk_result = self._try_pyzk_sync()
+            if pyzk_result:
+                return Response(pyzk_result)
+
+            # Fallback: use zk_service (ADMS mode returns DB employees only)
             device_users = zk_service.get_users()
+            if not device_users:
+                return Response({
+                    'error': 'Không thể kết nối máy chấm công qua pyzk. '
+                             'Cần cấu hình NAT port 4370 trên MikroTik. '
+                             'Xem hướng dẫn: deploy/sync-device-users-guide.txt',
+                    'hint': 'Hoặc chạy trên VPS: python manage.py sync_device_users',
+                }, status=status.HTTP_503_SERVICE_UNAVAILABLE)
             created = 0
             updated = 0
             for u in device_users:
@@ -137,10 +156,87 @@ class SyncUsersView(APIView):
                 'total': len(device_users),
                 'created': created,
                 'updated': updated,
+                'source': 'database',
             })
         except Exception as e:
             logger.error(f"Sync users error: {e}")
             return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    def _try_pyzk_sync(self):
+        """Try to connect to device via pyzk and pull users."""
+        try:
+            from zk import ZK
+        except ImportError:
+            return None
+
+        ip = getattr(django_settings, 'ZK_DEVICE_IP', '113.160.150.125')
+        port = 4370  # ZK binary port (NOT ADMS port)
+        timeout = 10
+
+        profiles = [
+            {'force_udp': False, 'ommit_ping': True},
+            {'force_udp': False, 'ommit_ping': False},
+        ]
+
+        conn = None
+        for profile in profiles:
+            try:
+                zk = ZK(ip, port=port, timeout=timeout, password=0, **profile)
+                conn = zk.connect()
+                break
+            except Exception:
+                conn = None
+
+        if not conn:
+            return None
+
+        try:
+            conn.disable_device()
+            users = conn.get_users()
+            conn.enable_device()
+
+            if not users:
+                return None
+
+            created = 0
+            updated = 0
+            for u in users:
+                user_id = str(u.user_id)
+                name = u.name or f"User {user_id}"
+                obj, is_new = Employee.objects.update_or_create(
+                    uid=u.uid,
+                    defaults={
+                        'user_id': user_id,
+                        'name': name,
+                        'privilege': u.privilege,
+                        'group_id': str(u.group_id or ''),
+                        'card': u.card or 0,
+                    }
+                )
+                # Link orphan AttendanceLogs
+                AttendanceLog.objects.filter(
+                    user_id=user_id, employee__isnull=True
+                ).update(employee=obj)
+                if is_new:
+                    created += 1
+                else:
+                    updated += 1
+
+            return {
+                'message': f'Đồng bộ thành công từ máy CC: {created} mới, {updated} cập nhật',
+                'total': len(users),
+                'created': created,
+                'updated': updated,
+                'source': 'device_pyzk',
+            }
+        except Exception as e:
+            logger.warning(f"pyzk sync failed: {e}")
+            return None
+        finally:
+            try:
+                conn.disconnect()
+            except Exception:
+                pass
 
 
 class BatchCreateEmployeesView(APIView):

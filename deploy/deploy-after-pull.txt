@@ -1,0 +1,93 @@
+===============================================================
+  HƯỚNG DẪN DEPLOY SAU KHI PULL CODE MỚI VỀ VPS
+  Commit: d38422f - Fix: remove ZK Pull, enhance connection status UI
+  VPS: 123.30.48.72 | /opt/erp
+===============================================================
+
+
+--- BƯỚC 1: SSH vào VPS ---
+
+    ssh root@123.30.48.72
+    cd /opt/erp
+
+
+--- BƯỚC 2: Đổi ZK_PROTOCOL từ binary → adms ---
+
+    sed -i 's/ZK_PROTOCOL=binary/ZK_PROTOCOL=adms/' backend/.env.production
+
+    Xác nhận:
+    grep ZK_PROTOCOL backend/.env.production
+
+    Kết quả mong đợi:
+      ZK_PROTOCOL=adms
+
+    LƯU Ý: Nếu đang là ZK_PROTOCOL=adms rồi thì bỏ qua bước này.
+    Lý do thay đổi:
+      - Device Ronald Jack AI06F chỉ hỗ trợ ADMS push
+      - KHÔNG hỗ trợ pyzk binary pull
+      - ZK_PROTOCOL=binary sẽ dùng ZKBinaryService → lỗi kết nối
+      - ZK_PROTOCOL=adms sẽ dùng ADMSService → đúng
+
+
+--- BƯỚC 3: Rebuild + restart backend ---
+
+    docker compose up -d --build backend
+
+    Đợi khoảng 30-60 giây để build xong.
+
+
+--- BƯỚC 4: Kiểm tra log backend ---
+
+    docker compose logs backend --tail 30
+
+    Kết quả mong đợi:
+      [ZK-TCP] ★ Server listening on ('0.0.0.0', 7005)
+      ... (Daphne server started)
+
+    KHÔNG được thấy:
+      ✗ Dòng [ZK-PULL] nào (đã bị xóa khỏi entrypoint)
+      ✗ Lỗi "can't reach device" hoặc pyzk connection error
+
+
+--- BƯỚC 5: Kiểm tra frontend ---
+
+    Mở trình duyệt → vào trang Chấm công → Cài đặt thiết bị
+
+    Kết quả mong đợi:
+      - Protocol hiện: "ZK Push TCP (Binary)" hoặc "ADMS Push (WebSocket)"
+      - Trạng thái: Online (nếu device đã kết nối)
+      - Port hiển thị: 7005 (ZK Push TCP)
+
+    Nếu device chưa kết nối:
+      - Trạng thái: Offline
+      - Hướng dẫn cấu hình hiện đúng port 7005
+
+
+--- BƯỚC 6: Kiểm tra ZK Push TCP đang nhận dữ liệu ---
+
+    docker compose logs backend -f | grep "ZK-TCP"
+
+    Khi nhân viên chấm công, sẽ thấy:
+      [ZK-TCP] ★ New connection from ...
+      [ZK-TCP] PUNCH: user_id=XX, timestamp=...
+      [ZK-TCP] ✓ Saved attendance record
+
+
+===============================================================
+  XỬ LÝ LỖI
+===============================================================
+
+[Lỗi] Backend không start được:
+  → docker compose logs backend --tail 50
+  → Kiểm tra .env.production có đúng ZK_PROTOCOL=adms không
+
+[Lỗi] Frontend hiện sai protocol:
+  → Xóa cache trình duyệt (Ctrl+Shift+R)
+  → Kiểm tra API: curl http://localhost:8000/api/attendance/device/protocol/
+
+[Lỗi] Device không kết nối (Offline):
+  → Xem file: deploy/zk-connectivity-test.txt
+  → Kiểm tra MikroTik NAT + Filter rules
+  → Đảm bảo máy chấm công cấu hình đúng IP VPS và port 7005
+
+===============================================================

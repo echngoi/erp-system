@@ -1,0 +1,124 @@
+===============================================================
+  HƯỚNG DẪN: LẤY DANH SÁCH NHÂN VIÊN TỪ MÁY CHẤM CÔNG
+  Device: Ronald Jack AI06F (SN=ZXRC13013923)
+  Giao thức: pyzk (ZK Binary) trên port 4370
+===============================================================
+
+
+  Tóm tắt: Máy CC đang push dữ liệu chấm công về VPS qua ZK Push
+  TCP (port 7005). Nhưng để lấy danh sách nhân viên (tên, mã NV),
+  cần kết nối ngược lại vào máy qua pyzk trên port 4370.
+
+
+===============================================================
+  BƯỚC 1: CẤU HÌNH MIKROTIK — Forward port 4370
+===============================================================
+
+  Chạy trong WinBox Terminal (1 dòng duy nhất, KHÔNG xuống dòng):
+
+  --- NAT rule ---
+  /ip firewall nat add chain=dstnat action=dst-nat to-addresses=192.168.1.225 to-ports=4370 protocol=tcp dst-address=113.160.150.125 dst-port=4370 comment="ZK binary SDK port 4370"
+
+  --- Filter rule ---
+  /ip firewall filter add chain=forward action=accept protocol=tcp in-interface=ether1 dst-port=4370 comment="Allow ZK binary 4370"
+
+  --- Xác nhận ---
+  /ip firewall nat print
+  /ip firewall filter print
+
+  Phải thấy:
+    - NAT: dst-port=4370 → 192.168.1.225:4370 (KHÔNG có routing-mark)
+    - Filter: forward accept tcp dst-port=4370
+
+
+===============================================================
+  BƯỚC 2: MỞ PORT 4370 TRÊN VPS FIREWALL
+===============================================================
+
+  SSH vào VPS:
+    ssh root@123.30.48.72
+
+    ufw allow 4370/tcp
+    ufw status | grep 4370
+
+
+===============================================================
+  BƯỚC 3: TEST KẾT NỐI TỪ VPS
+===============================================================
+
+    nc -zv -w 5 113.160.150.125 4370
+
+    Kết quả mong đợi:
+      Connection to 113.160.150.125 4370 port [tcp/*] succeeded!
+
+    Nếu timeout → kiểm tra MikroTik NAT/Filter (xem Bước 1)
+    Nếu "Connection refused" → máy CC chưa bật hoặc port 4370 không mở
+
+
+===============================================================
+  BƯỚC 4: LẤY DANH SÁCH NHÂN VIÊN
+===============================================================
+
+  Cách 1: Management command (khuyến nghị)
+
+    cd /opt/erp
+    docker compose exec backend python manage.py sync_device_users
+
+    Hoặc chỉ xem (không lưu):
+    docker compose exec backend python manage.py sync_device_users --dry-run
+
+    Hoặc chỉ định IP:
+    docker compose exec backend python manage.py sync_device_users --ip 113.160.150.125 --port 4370
+
+
+  Cách 2: API từ frontend
+
+    Vào web → Chấm công → Cài đặt thiết bị → Đồng bộ nhân viên
+    API sẽ tự kết nối và lấy danh sách.
+
+
+  Cách 3: Script từ PC cùng mạng LAN
+
+    cd "d:\myproject\ERP (COPY)"
+    pip install pyzk requests
+    python deploy/sync_users_from_device.py --device-ip 192.168.1.225
+
+    Script sẽ kết nối vào máy CC qua LAN và upload lên server.
+
+
+===============================================================
+  BƯỚC 5: KIỂM TRA KẾT QUẢ
+===============================================================
+
+    docker compose exec backend python manage.py shell -c "
+    from attendance.models import Employee
+    for e in Employee.objects.all():
+        print(f'UID={e.uid} | ID={e.user_id} | Name={e.name} | Card={e.card}')
+    print(f'Total: {Employee.objects.count()} employees')
+    "
+
+    Hoặc trên web: Chấm công → Nhân viên
+
+
+===============================================================
+  XỬ LÝ LỖI
+===============================================================
+
+  [Lỗi] "Could not connect to device"
+    → Port 4370 chưa được forward qua MikroTik (xem Bước 1)
+    → Hoặc máy CC tắt nguồn
+
+  [Lỗi] "Connection refused"
+    → Máy CC có thể không mở port 4370
+    → Thử port khác: --port 5005 hoặc --port 80
+
+  [Lỗi] "can't reach device (ping ...)"
+    → pyzk đang thử ping ICMP trước khi kết nối
+    → Command đã dùng ommit_ping=True nên không gặp lỗi này
+    → Nếu vẫn bị, thử udp: --force-udp
+
+  [Thành công nhưng 0 users]
+    → Máy CC chưa đăng ký nhân viên nào
+    → Kiểm tra trực tiếp trên máy CC: Menu → Quản lý người dùng
+
+===============================================================

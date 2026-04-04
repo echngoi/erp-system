@@ -1,0 +1,236 @@
+===============================================================
+  KIỂM TRA KẾT NỐI VPS → MÁY CHẤM CÔNG (Ronald Jack AI06F)
+  Machine WAN : 113.160.150.125 | Port : 5005
+  VPS         : 123.30.48.72   | /opt/erp
+===============================================================
+
+--- BƯỚC 1: SSH vào VPS ---
+
+    ssh root@123.30.48.72
+
+
+--- BƯỚC 2: Ping kiểm tra ICMP (chỉ kiểm tra mạng, không kiểm tra port) ---
+
+    ping -c 4 113.160.150.125
+
+
+--- BƯỚC 3: Kiểm tra TCP port 5005 có mở không ---
+
+    nc -zv -w 5 113.160.150.125 5005
+
+    Kết quả mong đợi:
+      Connection to 113.160.150.125 5005 port [tcp/*] succeeded!
+
+    Nếu thấy "Connection refused" → port đang bị block hoặc MikroTik rule chưa đúng
+    Nếu thấy "No route to host" hoặc timeout → MikroTik filter rules đang DROP
+
+
+--- BƯỚC 4: Chạy ZK Pull một lần để test kết nối thực tế ---
+
+    cd /opt/erp
+    docker compose exec backend python manage.py run_zk_pull --once
+
+    Kết quả mong đợi:
+      [ZK-PULL] One-time pull from 113.160.150.125:5005...
+      [ZK-PULL] ✓ Saved XX new records (device total: XX)
+      [ZK-PULL] Done. XX new records saved.
+
+    Nếu thấy lỗi "can't reach device" → xem lại MikroTik NAT/Filter rules
+
+
+--- BƯỚC 5: Xem log ZK Pull (đang chạy định kỳ 60s) ---
+
+    docker compose logs backend --since 5m | grep "ZK-PULL"
+
+    Hoặc xem log live:
+    docker compose logs backend -f | grep "ZK-PULL"
+
+
+--- BƯỚC 6: Kiểm tra log toàn bộ backend (30 dòng cuối) ---
+
+    docker compose logs backend --tail 30
+
+
+--- XỬ LÝ LỖI THƯỜNG GẶP ---
+
+[Lỗi] "can't reach device" / timeout:
+  → Kiểm tra MikroTik NAT rule:
+      /ip firewall nat print
+     Phải thấy: dst-port=5005, to-addresses=192.168.1.225, to-ports=5005
+  → Kiểm tra MikroTik Filter rules:
+      /ip firewall filter print
+     Xem có rule DROP trong FORWARD chain không
+
+[Lỗi] "Connection refused":
+  → Máy chấm công chưa bật hoặc port cài sai
+  → Vào máy CC kiểm tra: Menu → Cài đặt kết nối → Số cổng = 5005
+
+[Thành công nhưng 0 records]:
+  → Trong máy CC chưa có dữ liệu chấm công mới hoặc
+  → Device memory đã bị đọc hết (dữ liệu cũ đã sync)
+
+
+===============================================================
+  FIX: MikroTik FORWARD chain đang DROP gói tin từ WAN vào LAN
+  Triệu chứng: ping 100% loss + nc timeout (không phải refused)
+  Nguyên nhân: MikroTik mặc định DROP toàn bộ traffic forward
+               từ ngoài vào LAN, kể cả sau khi đã có NAT rule
+===============================================================
+
+--- CÁCH FIX — Chạy trong WinBox Terminal ---
+
+  Bối cảnh (đã xác nhận qua /ip firewall filter print):
+  ----------------------------------------------------------------
+    Rule 1 = chain=forward action=accept protocol=tcp in-interface=ether1 dst-port=808>
+    Dấu ">" = danh sách port bị cắt ngắn → port 5005 CHƯA có trong đó
+    Không có catch-all DROP → MikroTik dùng default policy DROP khi không
+    match rule nào = gói TCP 5005 bị DROP
+
+
+  Bước 1: Xem đầy đủ danh sách port của rule 1
+  ----------------------------------------------------------------
+    /ip firewall filter print detail where chain=forward action=accept
+
+    Kết quả mong đợi (ví dụ):
+      chain=forward action=accept protocol=tcp
+      in-interface=ether1
+      dst-port=8080,8443,808
+      log=no log-prefix=""
+
+    → Ghi lại toàn bộ giá trị dst-port (VD: 8080,8443,808)
+       Sẽ dùng ở Bước 2
+
+
+  Bước 2: Thêm 5005 vào danh sách port của rule 1
+  ----------------------------------------------------------------
+    Thay <danh_sach_cu> bằng giá trị lấy từ Bước 1:
+
+      /ip firewall filter set 1 dst-port=<danh_sach_cu>,5005
+
+    Ví dụ nếu Bước 1 cho thấy dst-port=8080,8443,808:
+      /ip firewall filter set 1 dst-port=8080,8443,808,5005
+
+    --- HOẶC thay thế bằng cách thêm rule mới (AN TOÀN HƠN, khuyến nghị) ---
+
+    LƯU Ý QUAN TRỌNG:
+      - MikroTik terminal KHÔNG hỗ trợ ký tự \ xuống dòng
+      - Phải gõ TOÀN BỘ lệnh trên 1 DÒNG DUY NHẤT
+      - Không dùng place-before nếu không chắc có bao nhiêu rule
+
+      /ip firewall filter add chain=forward action=accept protocol=tcp in-interface=ether1 dst-port=5005 comment="Allow ZK attendance 5005"
+
+
+  Bước 3: Xác nhận
+  ----------------------------------------------------------------
+    /ip firewall filter print detail where chain=forward action=accept
+
+    Kiểm tra: 5005 phải xuất hiện trong dst-port của rule 1
+              (hoặc thấy rule mới "Allow ZK attendance 5005")
+
+
+  Bước 4: Test lại từ VPS sau khi thêm rule
+  ----------------------------------------------------------------
+    nc -zv -w 5 113.160.150.125 5005
+
+    Kết quả mong đợi:
+      Connection to 113.160.150.125 5005 port [tcp/*] succeeded!
+
+    Sau đó chạy ZK Pull:
+      cd /opt/erp
+      docker compose exec backend python manage.py run_zk_pull --once
+
+
+  Bước 5 (tùy chọn): Nếu muốn cho phép ping từ ngoài vào
+  ----------------------------------------------------------------
+    /ip firewall filter add \
+      chain=forward \
+      protocol=icmp \
+      action=accept \
+      comment="Allow ICMP forward" \
+      place-before=0
+
+===============================================================
+  KIỂM TRA XEM NAT VÀ FILTER RULE ĐÃ TỒN TẠI CHƯA
+  (Chạy trong WinBox Terminal khi nc vẫn timeout)
+===============================================================
+
+--- Lệnh 1: Kiểm tra NAT rule ---
+
+    /ip firewall nat print
+
+    Phải thấy dòng có:
+      chain=dstnat  dst-port=5005  action=dst-nat
+      to-addresses=192.168.1.225  to-ports=5005
+
+    Nếu KHÔNG thấy → thêm NAT rule (1 dòng duy nhất):
+      /ip firewall nat add chain=dstnat dst-address=113.160.150.125 protocol=tcp dst-port=5005 action=dst-nat to-addresses=192.168.1.225 to-ports=5005 comment="ZK attendance 5005"
+
+
+--- Lệnh 2: Kiểm tra Filter rule ---
+
+        /ip firewall filter print
+
+    Phải thấy dòng có:
+      chain=forward  dst-port=5005  action=accept
+
+    Nếu KHÔNG thấy → thêm Filter rule (1 dòng duy nhất):
+      /ip firewall filter add chain=forward action=accept protocol=tcp in-interface=ether1 dst-port=5005 comment="Allow ZK attendance 5005"
+
+
+--- Sau khi xác nhận đủ 2 rule → Test lại từ VPS ---
+
+    nc -zv -w 5 113.160.150.125 5005
+
+===============================================================
+
+
+===============================================================
+  FIX: NAT rule có routing-mark=main → DNAT không trigger
+  Triệu chứng: NAT rule và Filter rule đều có nhưng nc vẫn timeout
+  Nguyên nhân: routing-mark=main làm rule chỉ match traffic từ
+               route table "main", traffic WAN thông thường không
+               mang routing-mark nào → rule bị bỏ qua
+===============================================================
+
+--- CÁCH FIX — Xóa rule cũ và tạo lại không có routing-mark ---
+
+  LƯU Ý: MikroTik KHÔNG cho phép set routing-mark thành rỗng bằng
+          lệnh set routing-mark="" → lỗi "ambiguous value of mark"
+          Cách duy nhất: XÓA rule cũ rồi TẠO LẠI không có routing-mark
+
+
+  Bước 1: Xóa rule cũ (số thứ tự 1)
+  ----------------------------------------------------------------
+    /ip firewall nat remove 1
+
+
+  Bước 2: Tạo lại rule đúng — KHÔNG có routing-mark (1 dòng duy nhất)
+  ----------------------------------------------------------------
+    /ip firewall nat add chain=dstnat action=dst-nat to-addresses=192.168.1.225 to-ports=5005 protocol=tcp dst-address=113.160.150.125 dst-port=5005 comment="ZK attendance machine port 5005"
+
+
+  Bước 3: Xác nhận rule mới đúng
+  ----------------------------------------------------------------
+    /ip firewall nat print
+
+    Kiểm tra rule ZK (dst-port=5005):
+      ✓ KHÔNG có dòng routing-mark
+      ✓ Cấu trúc giống rule port 8088 (đang hoạt động)
+
+    Cấu trúc mong đợi:
+      chain=dstnat action=dst-nat to-addresses=192.168.1.225 to-ports=5005
+      protocol=tcp dst-address=113.160.150.125 dst-port=5005
+
+
+  Bước 4: Test lại từ VPS
+  ----------------------------------------------------------------
+    nc -zv -w 5 113.160.150.125 5005
+
+    Kết quả mong đợi:
+      Connection to 113.160.150.125 5005 port [tcp/*] succeeded!
+
+    Sau đó chạy ZK Pull:
+      cd /opt/erp
+      docker compose exec backend python manage.py run_zk_pull --once
+
+===============================================================
