@@ -331,10 +331,10 @@ class ZKPushClientHandler:
 
         from attendance.zk_push_protocol import AttendanceRecord
 
-        ts = datetime.now()
+        ts = timezone.now()  # Aware UTC datetime — correct in any timezone
 
         logger.warning(f"[ZK-TCP] ★ Saving punch: user_id={user_id} "
-                       f"time={ts.strftime('%Y-%m-%d %H:%M:%S')} "
+                       f"time={timezone.localtime(ts).strftime('%Y-%m-%d %H:%M:%S')} "
                        f"SN={serial_number}")
 
         record = AttendanceRecord(
@@ -351,8 +351,11 @@ class ZKPushClientHandler:
             logger.warning(f"[ZK-TCP] ✓ Punch saved and pushed to WebSocket! "
                            f"user={user_id} saved={saved}")
         else:
+            # Save failed or duplicate — clear dedup marker so next attempt retries
+            _last_punch_raw.pop(serial_number, None)
+            _last_punch_time.pop(user_id, None)
             logger.warning(f"[ZK-TCP] Punch record: user={user_id} "
-                           f"saved={saved} (may be duplicate)")
+                           f"saved={saved} (may be duplicate — dedup marker cleared)")
 
     async def _handle_heartbeat(self, packet):
         """Handle keep-alive heartbeat."""
