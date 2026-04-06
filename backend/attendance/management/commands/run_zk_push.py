@@ -422,6 +422,17 @@ class ZKPushClientHandler:
                     logger.warning(f"[ZK-TCP] Same user {user_id} re-punch after "
                                    f"{hours_since:.1f}h — saving (check-out?)")
 
+        # ── Layer 3: DB-level dedup (protects against restart + replay) ─────────
+        loop = asyncio.get_event_loop()
+        already_saved = await loop.run_in_executor(
+            None, _sync_check_recent_punch, user_id, PUNCH_SAME_USER_HOURS
+        )
+        if already_saved:
+            _last_saved_session[serial_number] = (session_val, now)  # Restore in-memory
+            if _should_log((serial_number, session_val, 'db_dedup')):
+                logger.info(f"[ZK-TCP] DB dedup: user={user_id} — recent record in DB, skipping")
+            return
+
         # ── New punch event — save it ────────────────────────────────────────
         from attendance.zk_push_protocol import AttendanceRecord
 
@@ -684,6 +695,22 @@ def _sync_save_attendance(records, sn):
         )
 
     return saved, new_records
+
+
+def _sync_check_recent_punch(user_id: str, hours: int = 4) -> bool:
+    """Check if a recent punch for this user exists in DB (sync, for thread pool).
+
+    Used as DB-level dedup layer — protects against in-memory state loss
+    after server restart while device is still replaying cached notifications.
+    """
+    from attendance.models import AttendanceLog
+    from django.utils import timezone as tz
+    from datetime import timedelta
+    cutoff = tz.now() - timedelta(hours=hours)
+    return AttendanceLog.objects.filter(
+        user_id=user_id,
+        timestamp__gte=cutoff,
+    ).exists()
 
 
 def _sync_save_employees(user_records, sn) -> int:
