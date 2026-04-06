@@ -219,3 +219,6 @@ ZK_DEVICE_PORT     = int(os.getenv('ZK_DEVICE_PORT',     '5005'))
 ZK_DEVICE_TIMEOUT  = int(os.getenv('ZK_DEVICE_TIMEOUT',  '10'))
 ZK_DEVICE_PASSWORD = int(os.getenv('ZK_DEVICE_PASSWORD', '0'))
 ZK_PROTOCOL        = os.getenv('ZK_PROTOCOL',        'adms')
+
+# ── Local PC Sync Key (pyzk → VPS) ──
+LOCAL_SYNC_KEY     = os.getenv('LOCAL_SYNC_KEY', '')

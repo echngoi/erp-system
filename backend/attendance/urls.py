@@ -1,5 +1,6 @@
 from django.urls import path
 from . import views
+from .sync_api_views import LocalSyncAttendanceView, LocalSyncEmployeesView
 
 urlpatterns = [
     # Device management
@@ -52,4 +53,8 @@ urlpatterns = [
     path('penalty-configs/',            views.PenaltyConfigListCreateView.as_view(),  name='penalty-config-list'),
     path('penalty-configs/<int:pk>/',   views.PenaltyConfigDetailView.as_view(),      name='penalty-config-detail'),
     path('penalty-configs/bulk/',       views.PenaltyConfigBulkView.as_view(),        name='penalty-config-bulk'),
+
+    # Local PC sync (pyzk → VPS)
+    path('local-sync/attendance/', LocalSyncAttendanceView.as_view(), name='local-sync-attendance'),
+    path('local-sync/employees/',  LocalSyncEmployeesView.as_view(),  name='local-sync-employees'),
 ]

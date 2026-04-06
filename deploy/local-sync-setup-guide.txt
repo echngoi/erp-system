@@ -1,0 +1,274 @@
+================================================================================
+  HƯỚNG DẪN: SYNC DỮ LIỆU CHẤM CÔNG TỪ MÁY CC → PC LOCAL → VPS
+  Phương pháp: pyzk (LAN pull) + HTTPS API (push lên VPS)
+================================================================================
+
+  Kiến trúc:
+
+  ┌──────────────┐    LAN TCP/4370    ┌──────────────┐    HTTPS API    ┌──────────┐
+  │  Máy CC      │ ←───────────────→  │  PC Local    │ ──────────────→ │   VPS    │
+  │  AI06F       │   pyzk pull        │  local_sync  │  POST JSON     │  Django  │
+  │  192.168.1.225│  mỗi 60 giây     │  .py script  │                 │  API     │
+  └──────────────┘                    └──────────────┘                 └──────────┘
+
+  Ưu điểm so với ZK binary push qua WAN:
+  ✓ Lấy được TIMESTAMP THỰC từ máy chấm công (không phụ thuộc VPS time)
+  ✓ Lấy được TÊN NHÂN VIÊN từ máy (tự đồng bộ Employee list)
+  ✓ Kết nối LAN ổn định, không qua ISP/firewall
+  ✓ pyzk là thư viện proven, dùng rộng rãi
+  ✓ Đơn giản, dễ debug
+
+
+================================================================================
+  BƯỚC 1: CÀI ĐẶT TRÊN PC LOCAL (PC trong cùng mạng LAN với máy CC)
+================================================================================
+
+  Yêu cầu:
+  - Python 3.8+
+  - Cùng mạng LAN với máy chấm công (192.168.1.x)
+  - Internet để gửi dữ liệu lên VPS
+
+  ─────────────────────────────────────────────────────────────────────────
+  1.1 Cài Python (nếu chưa có)
+  ─────────────────────────────────────────────────────────────────────────
+
+  Tải từ: https://www.python.org/downloads/
+  Khi cài, TICK chọn "Add Python to PATH"
+
+  ─────────────────────────────────────────────────────────────────────────
+  1.2 Copy thư mục local_sync vào PC Local
+  ─────────────────────────────────────────────────────────────────────────
+
+  Copy thư mục: local_sync/ (chứa local_sync.py + requirements.txt)
+  Đặt vào bất kỳ đâu, ví dụ: C:\local_sync\
+
+  ─────────────────────────────────────────────────────────────────────────
+  1.3 Cài thư viện Python
+  ─────────────────────────────────────────────────────────────────────────
+
+  Mở CMD hoặc PowerShell:
+
+    cd C:\local_sync
+    pip install -r requirements.txt
+
+  Hoặc:
+
+    pip install pyzk requests
+
+  ─────────────────────────────────────────────────────────────────────────
+  1.4 Test kết nối đến máy chấm công
+  ─────────────────────────────────────────────────────────────────────────
+
+  Trước tiên ping thử:
+
+    ping 192.168.1.225
+
+  Nếu ping được → máy CC và PC cùng mạng LAN.
+  Nếu không ping được → kiểm tra mạng/IP.
+
+
+================================================================================
+  BƯỚC 2: CẤU HÌNH TRÊN VPS
+================================================================================
+
+  ─────────────────────────────────────────────────────────────────────────
+  2.1 Tạo Sync Key (mật khẩu để PC Local gửi dữ liệu lên VPS)
+  ─────────────────────────────────────────────────────────────────────────
+
+  SSH vào VPS:
+
+    ssh root@123.30.48.72
+    cd /opt/erp
+
+  Tạo một key ngẫu nhiên (hoặc tự đặt):
+
+    python3 -c "import secrets; print(secrets.token_urlsafe(32))"
+
+  → Copy key này, ví dụ: AbCdEfGhIjKlMnOpQrStUvWxYz123456
+
+  ─────────────────────────────────────────────────────────────────────────
+  2.2 Thêm key vào file .env.production trên VPS
+  ─────────────────────────────────────────────────────────────────────────
+
+    nano /opt/erp/backend/.env.production
+
+  Thêm dòng:
+
+    LOCAL_SYNC_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz123456
+
+  (Thay bằng key thật từ bước 2.1)
+
+  Lưu file (Ctrl+O, Enter, Ctrl+X)
+
+  ─────────────────────────────────────────────────────────────────────────
+  2.3 Pull code mới và rebuild backend
+  ─────────────────────────────────────────────────────────────────────────
+
+    cd /opt/erp
+    git pull origin master
+    docker compose up -d --build backend
+    docker compose logs backend --tail 10
+
+
+================================================================================
+  BƯỚC 3: CHẠY SYNC TRÊN PC LOCAL
+================================================================================
+
+  ─────────────────────────────────────────────────────────────────────────
+  3.1 Chạy thử (một lần, xem có hoạt động không)
+  ─────────────────────────────────────────────────────────────────────────
+
+    cd C:\local_sync
+
+    python local_sync.py --once --sync-key AbCdEfGhIjKlMnOpQrStUvWxYz123456
+
+  → Phải thấy output:
+    Connected to device 192.168.1.225:4370
+    Pulled 50 new attendance records (since 2000-01-01 00:00:00)
+    Pulled 25 employees from device
+    Attendance sync: saved=50, skipped=0
+    Employees: created=25, updated=0
+
+  Nếu lỗi "Connection refused" → sai IP hoặc máy CC chưa mở.
+  Nếu lỗi "HTTP 403" → sync key sai.
+
+  ─────────────────────────────────────────────────────────────────────────
+  3.2 Chạy liên tục (mỗi 60 giây sync một lần)
+  ─────────────────────────────────────────────────────────────────────────
+
+    python local_sync.py --sync-key AbCdEfGhIjKlMnOpQrStUvWxYz123456
+
+  Hoặc với tham số đầy đủ:
+
+    python local_sync.py ^
+      --device-ip 192.168.1.225 ^
+      --device-port 4370 ^
+      --api-url https://api.hrmgo.site ^
+      --sync-key AbCdEfGhIjKlMnOpQrStUvWxYz123456 ^
+      --interval 60
+
+  Script sẽ chạy liên tục, cứ 60 giây pull từ máy CC và push lên VPS.
+  Nhấn Ctrl+C để dừng.
+
+  ─────────────────────────────────────────────────────────────────────────
+  3.3 Chạy tự động khi bật PC (Windows Task Scheduler)
+  ─────────────────────────────────────────────────────────────────────────
+
+  Cách 1: Tạo file .bat rồi kéo vào Startup:
+
+    Tạo file C:\local_sync\start_sync.bat với nội dung:
+
+      @echo off
+      cd /d C:\local_sync
+      python local_sync.py --sync-key AbCdEfGhIjKlMnOpQrStUvWxYz123456
+      pause
+
+    Tạo shortcut của file này → copy vào:
+      C:\Users\<TenUser>\AppData\Roaming\Microsoft\Windows\Start Menu\Programs\Startup
+
+  Cách 2: Dùng Task Scheduler:
+
+    1. Mở Task Scheduler (Win+R → taskschd.msc)
+    2. Create Basic Task
+       - Name: "ZK Attendance Sync"
+       - Trigger: When computer starts
+       - Action: Start a program
+       - Program: python
+       - Arguments: C:\local_sync\local_sync.py --sync-key AbCdEfGhIjKlMnOpQrStUvWxYz123456
+       - Start in: C:\local_sync
+    3. Finish
+
+  ─────────────────────────────────────────────────────────────────────────
+  3.4 Dùng Environment Variable thay vì --sync-key
+  ─────────────────────────────────────────────────────────────────────────
+
+  Nếu không muốn key hiển thị trong command line:
+
+    set SYNC_KEY=AbCdEfGhIjKlMnOpQrStUvWxYz123456
+    set ZK_DEVICE_IP=192.168.1.225
+    set SYNC_API_URL=https://api.hrmgo.site
+
+    python local_sync.py
+
+
+================================================================================
+  BƯỚC 4: KIỂM TRA DỮ LIỆU TRÊN VPS
+================================================================================
+
+  ─────────────────────────────────────────────────────────────────────────
+  4.1 Kiểm tra log trên VPS
+  ─────────────────────────────────────────────────────────────────────────
+
+    docker compose logs backend | grep "LocalSync"
+
+  → Phải thấy:
+    [LocalSync] Saved 5 attendance records, skipped 0
+    [LocalSync] Employees: created=25, updated=0
+
+  ─────────────────────────────────────────────────────────────────────────
+  4.2 Kiểm tra dữ liệu trong DB
+  ─────────────────────────────────────────────────────────────────────────
+
+    docker compose exec backend python manage.py shell -c "
+    from attendance.models import Employee, AttendanceLog
+    print('Employees:', Employee.objects.count())
+    print('Attendance logs:', AttendanceLog.objects.count())
+    for e in Employee.objects.all()[:5]:
+        print(f'  {e.user_id}: {e.name}')
+    for l in AttendanceLog.objects.order_by('-timestamp')[:5]:
+        print(f'  {l.user_id} at {l.timestamp}')
+    "
+
+  ─────────────────────────────────────────────────────────────────────────
+  4.3 Kiểm tra trên web
+  ─────────────────────────────────────────────────────────────────────────
+
+  Truy cập: https://hrmgo.site → Chấm công → Bảng chấm công
+  → Phải thấy dữ liệu chấm công với tên nhân viên và timestamp đúng.
+
+
+================================================================================
+  TÙY CHỈNH
+================================================================================
+
+  ┌──────────────────────┬───────────────────────┬──────────────────────────┐
+  │ Tham số               │ Mặc định              │ Mô tả                    │
+  ├──────────────────────┼───────────────────────┼──────────────────────────┤
+  │ --device-ip          │ 192.168.1.225         │ IP máy chấm công         │
+  │ --device-port        │ 4370                  │ Port TCP của máy CC       │
+  │ --device-password    │ 0                     │ Password máy CC (nếu có) │
+  │ --api-url            │ https://api.hrmgo.site│ URL VPS API              │
+  │ --sync-key           │ (bắt buộc)            │ Key xác thực             │
+  │ --interval           │ 60                    │ Giây giữa mỗi lần sync  │
+  │ --once               │ false                 │ Chạy 1 lần rồi thoát    │
+  └──────────────────────┴───────────────────────┴──────────────────────────┘
+
+
+================================================================================
+  XỬ LÝ SỰ CỐ
+================================================================================
+
+  ─── "Connection refused" khi kết nối máy CC ───
+
+  1) Kiểm tra IP máy CC: ping 192.168.1.225
+  2) Máy CC có thể dùng port khác: thử --device-port 5005
+  3) Firewall trên PC có chặn outbound port 4370 không?
+
+  ─── "HTTP 403 Forbidden" khi push lên VPS ───
+
+  1) Kiểm tra sync key đúng chưa
+  2) Kiểm tra .env.production trên VPS có LOCAL_SYNC_KEY chưa
+  3) Đã rebuild backend sau khi thêm .env chưa?
+
+  ─── "timeout" khi kết nối máy CC ───
+
+  1) Máy CC và PC có cùng subnet không? (192.168.1.x)
+  2) Tăng timeout: --device-timeout 30
+
+  ─── Không thấy dữ liệu mới ───
+
+  1) Xóa file .last_sync_state.json → script sẽ pull lại toàn bộ
+  2) Chạy: python local_sync.py --once --sync-key <key>
+  3) Kiểm tra VPS log: docker compose logs backend | grep "LocalSync"
+
+================================================================================
