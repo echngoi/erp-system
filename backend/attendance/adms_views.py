@@ -78,7 +78,7 @@ class IClockCdataView(View):
 
         # Ghi nhận máy vừa liên lạc
         client_ip = request.META.get('REMOTE_ADDR')
-        adms_record_contact(sn, ip=client_ip)
+        adms_record_contact(sn, ip=client_ip, push_type='iclock_http')
 
         # Trả về cấu hình cho máy
         # Stamp: mốc thời gian, máy chỉ gửi records mới hơn stamp
@@ -110,7 +110,7 @@ class IClockCdataView(View):
 
         # Ghi nhận máy vừa liên lạc
         client_ip = request.META.get('REMOTE_ADDR')
-        adms_record_contact(sn, ip=client_ip)
+        adms_record_contact(sn, ip=client_ip, push_type='iclock_http')
 
         if table == 'ATTLOG':
             count = self._save_attlog(body, sn)

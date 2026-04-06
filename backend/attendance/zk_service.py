@@ -304,7 +304,10 @@ class ADMSService:
         push_type = contact.get('push_type', 'adms_ws') if contact else None
 
         # Map push_type sang tên giao thức hiển thị
-        if push_type == 'zk_tcp':
+        if push_type == 'iclock_http':
+            protocol_label = 'iclock HTTP (Push Mode)'
+            protocol_note = 'Máy đẩy dữ liệu qua iclock HTTP → port 80 trên server.'
+        elif push_type == 'zk_tcp':
             protocol_label = 'ZK Push TCP (Binary)'
             protocol_note = 'Máy đẩy dữ liệu qua ZK Binary TCP → port 7005 trên server.'
         else:
@@ -326,7 +329,7 @@ class ADMSService:
                 f'Máy đang hoạt động. {protocol_note}'
                 if is_online else
                 'Đang chờ máy chấm công kết nối. '
-                'Máy cần cấu hình Server IP → IP WAN của VPS, Port → 7005 (ZK Push TCP).'
+                'Máy cần cấu hình Server IP → IP WAN của VPS, Port → 80 (iclock HTTP).'
             ),
         }
 
