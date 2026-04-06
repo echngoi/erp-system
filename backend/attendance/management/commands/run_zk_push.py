@@ -236,14 +236,12 @@ class ZKPushClientHandler:
             ack[5] = raw[5]
             ack[6:8] = raw[6:8]
 
-            if session_val != 0:
-                # PUNCH EVENT: Clear session bytes in ACK → tells device
-                # "notification received, clear your cache" so it stops replaying.
-                # If we echo back the session value, the device thinks the
-                # notification is still pending and replays forever.
-                ack[8:12] = b'\x00\x00\x00\x00'
-            else:
-                ack[8:12] = raw[8:12]
+            # Always echo session bytes back (both 0 heartbeat and punch notification).
+            # ZK binary standard: server echoes session to signal "received".
+            # Earlier approach (zero session) did NOT stop device from replaying —
+            # device kept sending session=134 indefinitely. Echoing back is the
+            # correct ACK that tells device to clear its push queue and advance.
+            ack[8:12] = raw[8:12]
 
             ack[12] = 0x32
             ack[13] = 0x01
@@ -253,7 +251,7 @@ class ZKPushClientHandler:
             ack_bytes = bytes(ack)
             if session_val != 0:
                 if _should_log((self.serial_number, session_val, 'punch_ack')):
-                    logger.info(f"[ZK-TCP] Sending PUNCH ACK (session cleared): {ack_bytes.hex()}")
+                    logger.info(f"[ZK-TCP] Sending PUNCH ACK (session echoed): {ack_bytes.hex()}")
             await self._send(ack_bytes)
 
             # ── PUNCH EVENT: session != 0 means attendance event ──────────
@@ -306,14 +304,14 @@ class ZKPushClientHandler:
                 self.registered = True
                 self.serial_number = packet.serial_number
 
-                # Build and send PUNCH ACK with session cleared
+                # Build and send PUNCH ACK with session echoed back
                 ack = bytearray(16)
                 ack[0:2] = b'\x5a\xa5'
                 ack[2:4] = raw[2:4]
                 ack[4] = raw[4]               # Echo seq for heartbeat/punch
                 ack[5] = raw[5]
                 ack[6:8] = raw[6:8]
-                ack[8:12] = b'\x00\x00\x00\x00'  # Clear session → device clears notification
+                ack[8:12] = raw[8:12]         # Echo session → device clears notification
                 ack[12] = 0x32
                 ack[13] = 0x01
                 ack[14] = sum(ack[0:14]) & 0xFF
