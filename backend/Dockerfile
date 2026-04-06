@@ -32,7 +32,7 @@ RUN chmod +x entrypoint.sh && \
 
 USER app
 
-EXPOSE 8000
+EXPOSE 8000 7005
 
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
     CMD curl -f http://localhost:8000/iclock/cdata?SN=healthcheck || exit 1

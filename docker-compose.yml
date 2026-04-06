@@ -46,6 +46,7 @@ services:
         condition: service_healthy
     ports:
       - "127.0.0.1:8000:8000"
+      - "7005:7005"
 
   # ── Nginx Reverse Proxy ──
   nginx:
@@ -61,7 +62,6 @@ services:
     ports:
       - "80:80"
       - "443:443"
-      - "7005:7005"
     depends_on:
       - backend
 

@@ -19,5 +19,8 @@ python manage.py migrate --noinput
 echo "→ Collecting static files..."
 python manage.py collectstatic --noinput
 
+echo "→ Starting ZK Push TCP Server on port 7005..."
+python manage.py run_zk_push --port 7005 &
+
 echo "→ Starting Daphne..."
 exec daphne -b 0.0.0.0 -p 8000 config.asgi:application
